@@ -38,6 +38,7 @@ const ctx: ToolContext = {
       { t: hoursFromNow(-24 * 10), value: 1, min: 1, max: 1, count: 1 },
       { t: hoursFromNow(-2), value: 48, expectedValue: 70, min: 48, max: 48, count: 1 }] },
     { provider: "claude", metric: "seven_day_fable", points: [] },
+    { provider: "claude", metric: "five_hour", points: [{ t: hoursFromNow(-2), value: 5, min: 5, max: 5, count: 1 }] },
     { provider: "claude3", metric: "seven_day", points: [] }] }),
   getRecent: async () => [
     { startedAt: hoursFromNow(-0.1), model: "claude-opus-5-5", outcome: "ok", jev: { effort: "high", resolved: "claude-opus-5-5" } },

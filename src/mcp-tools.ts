@@ -216,7 +216,9 @@ export async function callTool(name: string, rawArgs: unknown, ctx: ToolContext)
       if (granularity !== "hourly" && granularity !== "daily") return fail("invalid_argument", "granularity must be hourly or daily.");
       const cutoff = now - days * 86_400_000;
       const series = ctx.getHistory(granularity).series
-        .filter(s => s.provider === args.account && (s.metric === "seven_day" || s.metric === "five_hour"))
+        .filter(s => s.provider === args.account
+          // Claude's retired 5-hour window can still be in old history; only Codex has one now.
+          && (s.metric === "seven_day" || (s.metric === "five_hour" && args.account.startsWith("codex"))))
         .map(s => ({ metric: s.metric === "seven_day" ? "weekly" : "five_hour",
           points: s.points.filter(pt => Date.parse(pt.t) >= cutoff).slice(-400)
             .map(pt => ({ t: pt.t, used_percent: pt.value, ...(pt.expectedValue === undefined ? {} : { expected_percent: pt.expectedValue }) })) }));
