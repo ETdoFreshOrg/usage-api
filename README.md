@@ -60,6 +60,33 @@ Codex usage exposes semantic `five_hour` and `seven_day` windows. Either may be
 `secondary` fields remain as compatibility aliases for `five_hour` and
 `seven_day`; they do not mirror OpenAI's variable raw slot positions.
 
+## MCP (read-only, owner-only)
+
+`https://usage.etdofresh.com/mcp` is a stateless Streamable HTTP MCP server for
+Claude / Duet custom connectors. It reads the same in-memory snapshot as
+`/api/usage` and has no write tools: it cannot pause accounts, spend reset
+credits or change CLIProxyAPI.
+
+| Tool | What it returns |
+| --- | --- |
+| `list_accounts(provider?)` | Each Claude/Codex account: weekly %, reset time, pace, Codex 5-hour window, freshness, proxy status; accounts paused on the proxy; other providers with data |
+| `get_usage(account)` | Full detail for one key (`claude3`, `codex`, `zai`, ...) |
+| `suggest_account(provider?)` | Accounts ranked by room for more work (blocked last) |
+| `usage_history(account, days?, granularity?)` | Weekly (and Codex 5-hour) % over time |
+| `recent_requests(hours?)` | Per-account request/error/token counts from CPA Manager, plus the latest 20 requests |
+
+Sign-in uses the single-owner OAuth module shared with imessage-mcp and
+memory-database (`oauth/`), with endpoints under `/mcp/oauth` and scope
+`usage.read`. Consent requires `USAGE_MCP_OWNER_KEY`; a copy is kept at
+`~/.secrets/usage-mcp-owner-key` (0600) on etzminisforumx1pro. Grants and token
+hashes live in `mcp-oauth.db` on the `usage-api-data` volume. Without the key
+the MCP is off and `/mcp` returns 503. Connector URL:
+`https://usage.etdofresh.com/mcp` (client ID blank, or `usage-claude`).
+
+Per-account counts in `recent_requests` come from CPA Manager's
+`account_snapshot`; they are only served behind OAuth. The public
+`/api/recent` still omits account identities.
+
 ## Adaptive polling
 
 Active Claude and Codex connections are discovered in the configured source every 30 seconds.

@@ -16,6 +16,24 @@ type AuthFile = {
   auth_index?: string; disabled?: boolean; id_token?: unknown;
 };
 
+export interface ProxyAccountStatus {
+  provider: string; email: string | null; enabled: boolean;
+  status?: string; status_message?: string; unavailable?: boolean; success?: number; failed?: number; next_retry_after?: string | number;
+}
+
+// Only plain status fields; tokens (id_token etc.), paths and quotas stay out.
+function proxyStatus(provider: string, file: AuthFile): ProxyAccountStatus {
+  const f = file as Record<string, unknown>;
+  const out: ProxyAccountStatus = { provider, email: file.email?.trim().toLowerCase() || null, enabled: !file.disabled };
+  if (typeof f.status === "string") out.status = f.status;
+  if (typeof f.status_message === "string" && f.status_message) out.status_message = f.status_message.slice(0, 300);
+  if (typeof f.unavailable === "boolean") out.unavailable = f.unavailable;
+  if (typeof f.success === "number") out.success = f.success;
+  if (typeof f.failed === "number") out.failed = f.failed;
+  if (typeof f.next_retry_after === "string" || typeof f.next_retry_after === "number") out.next_retry_after = f.next_retry_after;
+  return out;
+}
+
 function accountId(value: unknown): string | null {
   try {
     const token = typeof value === "string" && value.includes(".")
@@ -27,6 +45,8 @@ function accountId(value: unknown): string | null {
 
 export class CliProxyClient {
   private accounts: ProxyAccount[] = [];
+  /** Claude/Codex accounts on the proxy, enabled or not, from the last listing (identity and status only, no tokens). */
+  proxyAccounts: ProxyAccountStatus[] | null = null;
   private profiles = new Map<string, { at: number; label: string | null }>();
   constructor(private readonly baseUrl: string, private readonly key: string,
     private readonly aliases: Record<string, string> = {}, private readonly fetcher: typeof fetch = fetch) {}
@@ -47,8 +67,10 @@ export class CliProxyClient {
     const result = await this.management("auth-files");
     if (!Array.isArray(result.files)) throw new Error("CLIProxyAPI returned an invalid account list");
     const accounts: ProxyAccount[] = [];
+    const statuses: ProxyAccountStatus[] = [];
     for (const file of result.files as AuthFile[]) {
       const provider = file.provider ?? file.type;
+      if (provider && ["claude", "codex"].includes(provider)) statuses.push(proxyStatus(provider, file));
       if (!provider || !["claude", "codex"].includes(provider) || file.disabled || !file.auth_index) continue;
       const email = file.email?.trim().toLowerCase() || null;
       const workspace = accountId(file.id_token);
@@ -60,6 +82,7 @@ export class CliProxyClient {
       accounts.push({ id, provider, email, name: email ?? file.name ?? id, authIndex: file.auth_index, accountId: workspace });
     }
     this.accounts = accounts;
+    this.proxyAccounts = statuses;
     return accounts;
   }
 

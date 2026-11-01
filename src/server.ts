@@ -6,7 +6,9 @@ import { Poller } from "./cache.js";
 import { HistoryGranularity, HistoryStore } from "./history.js";
 import { assignAccounts } from "./accounts.js";
 import { CliProxyClient } from "./providers/cliproxy.js";
-import { RecentRequests } from "./recent.js";
+import { RecentRequests, AccountActivityReader } from "./recent.js";
+import { installMcp } from "./mcp.js";
+import { OAuthStore } from "../oauth/oauth-store.mjs";
 
 // Load env from the shared volume (same .env that ai-sessions uses) so secrets
 // live alongside the OAuth credentials instead of in Dokploy. Run before any
@@ -185,6 +187,9 @@ app.get("/api/health", (_req, res) => {
 const recentRequests = process.env.CPA_MANAGER_KEY
   ? new RecentRequests(process.env.CPA_MANAGER_URL ?? "http://etzminisforumx1pro.lan:18317", process.env.CPA_MANAGER_KEY)
   : null;
+const accountActivity = process.env.CPA_MANAGER_KEY
+  ? new AccountActivityReader(process.env.CPA_MANAGER_URL ?? "http://etzminisforumx1pro.lan:18317", process.env.CPA_MANAGER_KEY)
+  : null;
 app.get("/api/recent", async (_req, res) => {
   if (!recentRequests) { res.json({ source: "cliproxyapi", exchanges: [] }); return; }
   try { res.json({ source: "cliproxyapi", exchanges: await recentRequests.get() }); }
@@ -286,8 +291,8 @@ function enrichProviderData(provider: string, data: unknown): unknown {
   return data;
 }
 
-app.get("/api/usage", (_req, res) => {
-  const providers: Record<string, unknown> = {};
+function currentProviders(): Record<string, any> {
+  const providers: Record<string, any> = {};
   for (const [key, account] of accountPollers) {
     const snapshot = account.poller.snapshot();
     providers[key] = {
@@ -300,9 +305,13 @@ app.get("/api/usage", (_req, res) => {
   providers.openrouter = openrouter?.snapshot() ?? { data: null, error: "OPENROUTER_API_KEY not set" };
   providers.openai = openai?.snapshot() ?? { data: null, error: "OPENAI_ADMIN_KEY not set" };
   providers.jev = jev?.snapshot() ?? { data: null, error: "OPENROUTER_MANAGEMENT_KEY not set" };
+  return providers;
+}
+
+app.get("/api/usage", (_req, res) => {
   res.json({
     timestamp: new Date().toISOString(),
-    providers,
+    providers: currentProviders(),
   });
 });
 
@@ -313,6 +322,27 @@ app.get("/api/history", (req, res) => {
     : "daily";
   res.json(history.toSeries(granularity));
 });
+
+// Read-only MCP at /mcp (owner-key OAuth). Off unless USAGE_MCP_OWNER_KEY is set.
+const mcpEnabled = installMcp(app, {
+  ownerKey: process.env.USAGE_MCP_OWNER_KEY?.trim() || undefined,
+  publicOrigin: process.env.USAGE_MCP_PUBLIC_ORIGIN?.trim() || "https://usage.etdofresh.com",
+  store: process.env.USAGE_MCP_OWNER_KEY?.trim()
+    ? new OAuthStore(process.env.USAGE_MCP_OAUTH_DB ?? path.join(path.dirname(HISTORY_FILE), "mcp-oauth.db"))
+    : undefined,
+  getProviders: currentProviders,
+  getProxyAccounts: () => cliProxy?.proxyAccounts ?? null,
+  getHistory: (granularity) => history.toSeries(granularity),
+  getActivity: async (hours) => {
+    if (!accountActivity) return null;
+    try { return await accountActivity.get(hours); } catch { return null; }
+  },
+  getRecent: async () => {
+    if (!recentRequests) return null;
+    try { return await recentRequests.get(); } catch { return null; }
+  },
+});
+console.log(`usage MCP ${mcpEnabled ? "enabled at /mcp" : "off (USAGE_MCP_OWNER_KEY not set)"}`);
 
 // Serve the dashboard UI from /public.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

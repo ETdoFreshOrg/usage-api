@@ -10,7 +10,9 @@
     "dev": "tsx watch src/server.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "express": "^4.21.2",
+    "express-rate-limit": "^8.7.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
   },
