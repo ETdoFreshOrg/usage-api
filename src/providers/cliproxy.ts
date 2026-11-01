@@ -91,7 +91,9 @@ export class CliProxyClient {
       const headers = { "anthropic-beta": "oauth-2025-04-20",
         "User-Agent": `claude-cli/${process.env.CLAUDE_CLI_VERSION ?? "2.1.306"} (external, cli)` };
       const raw = await this.providerGet(account, "https://api.anthropic.com/api/oauth/usage?cedar_ember=1", headers);
-      if (!raw.five_hour || !raw.seven_day) throw new Error("Claude usage response is missing quota windows");
+      // Anthropic sends `five_hour: null` (and sometimes `seven_day: null`) while a window is idle or
+      // right after a reset. That is 0% used, not a bad response; only a body without the keys is.
+      if (!("five_hour" in raw) && !("seven_day" in raw)) throw new Error("Claude usage response is missing quota windows");
       let profile = this.profiles.get(id);
       if (!profile || Date.now() - profile.at > 3_600_000) {
         try {

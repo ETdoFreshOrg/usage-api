@@ -73,3 +73,20 @@ test("optional reset-credit failures preserve successful Codex usage and expose 
   assert.ok(data.reset_credits_error);
   assert.ok(calls.every(c => c.body?.method !== "POST"));
 });
+
+test("CPA treats idle Claude windows (null after a reset) as 0% instead of failing", async () => {
+  const { client } = setup([{ files: [file("claude", "one@example.com")] }, ok({
+    five_hour: null, seven_day: { utilization: 41, resets_at: "2026-11-05T00:00:00Z" }, seven_day_omelette: null,
+  }), ok({ account: { has_claude_max: true }, organization: { rate_limit_tier: "default_claude_max_20x" } })]);
+  const [account] = await client.listAccounts();
+  const data: any = await client.fetchUsage(account.id);
+  assert.equal(data.five_hour.utilization, 0);
+  assert.equal(data.five_hour.resets_at, null);
+  assert.equal(data.seven_day.utilization, 41);
+});
+
+test("CPA still rejects a Claude body with no quota windows at all", async () => {
+  const { client } = setup([{ files: [file("claude", "one@example.com")] }, ok({ error: { type: "x" } })]);
+  const [account] = await client.listAccounts();
+  await assert.rejects(client.fetchUsage(account.id), /missing quota windows/);
+});
