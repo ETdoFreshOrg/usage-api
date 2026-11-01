@@ -46,8 +46,8 @@ export interface ClaudeResetCredits {
   credits: ClaudeResetCredit[];
 }
 
+// Claude dropped its 5-hour limit (Nov 2026), so only weekly windows are reported.
 export interface ClaudeUsage {
-  five_hour: ClaudeWindow;
   seven_day: ClaudeWindow;
   seven_day_sonnet: ClaudeWindow | null;
   seven_day_opus: ClaudeWindow | null;
@@ -85,6 +85,11 @@ export interface RawUsageResponse {
   seven_day_opus?: RawWindow;
   seven_day_omelette?: RawWindow;
   limits?: RawLimit[];
+}
+
+/** True when a usage body carries the weekly window, directly or as a `weekly_all` limit. */
+export function hasWeeklyWindow(json: RawUsageResponse): boolean {
+  return "seven_day" in json || (json.limits ?? []).some((l) => l?.kind === "weekly_all");
 }
 
 export interface RawResetGrants {
@@ -133,7 +138,10 @@ export function parseClaudeUsage(
 
   // Model-scoped weekly windows, keyed by lowercased display name.
   const scoped = new Map<string, ClaudeWindow>();
+  let weeklyAll: ClaudeWindow | null = null;
   for (const limit of json.limits ?? []) {
+    if (limit?.kind === "weekly_all" && typeof limit.percent === "number")
+      weeklyAll = { utilization: limit.percent, resets_at: limit.resets_at ?? null };
     if (limit?.kind !== "weekly_scoped") continue;
     if (typeof limit.percent !== "number") continue;
     const name = limit.scope?.model?.display_name;
@@ -145,8 +153,7 @@ export function parseClaudeUsage(
   }
 
   return {
-    five_hour: win(json.five_hour ?? null),
-    seven_day: win(json.seven_day ?? null),
+    seven_day: json.seven_day ? win(json.seven_day) : weeklyAll ?? win(null),
     seven_day_sonnet: optWin(json.seven_day_sonnet ?? null) ?? scoped.get("sonnet") ?? null,
     seven_day_opus: optWin(json.seven_day_opus ?? null) ?? scoped.get("opus") ?? null,
     seven_day_design: optWin(json.seven_day_omelette ?? null)

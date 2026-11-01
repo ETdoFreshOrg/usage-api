@@ -216,8 +216,9 @@ function enrichClaude(snap: { data?: any }) {
     ...snap,
     data: {
       ...d,
-      five_hour: { ...d.five_hour, ...pacing(d.five_hour.utilization, d.five_hour.resets_at, FIVE_HOUR_MS) },
-      seven_day: { ...d.seven_day, ...pacing(d.seven_day.utilization, d.seven_day.resets_at, SEVEN_DAY_MS) },
+      // Claude has no 5-hour limit any more; drop it from cached snapshots seeded before the change.
+      five_hour: undefined,
+      seven_day: enrichSeven(d.seven_day ?? { utilization: 0, resets_at: null }),
       seven_day_sonnet: enrichSeven(d.seven_day_sonnet),
       seven_day_opus: enrichSeven(d.seven_day_opus),
       seven_day_design: enrichSeven(d.seven_day_design),

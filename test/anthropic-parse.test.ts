@@ -28,7 +28,7 @@ test("parseClaudeUsage reads model-scoped weekly limits (Fable) from limits[]", 
     utilization: 42,
     resets_at: "2026-07-14T14:00:00.114634+00:00",
   });
-  assert.equal(usage.five_hour.utilization, 13);
+  assert.equal("five_hour" in usage, false);
   assert.equal(usage.seven_day.utilization, 32);
   assert.equal(usage.seven_day_sonnet, null);
   assert.equal(usage.subscription_type, "max");

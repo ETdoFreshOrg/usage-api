@@ -74,19 +74,30 @@ test("optional reset-credit failures preserve successful Codex usage and expose 
   assert.ok(calls.every(c => c.body?.method !== "POST"));
 });
 
-test("CPA treats idle Claude windows (null after a reset) as 0% instead of failing", async () => {
+test("CPA reports Claude weekly usage only and ignores the retired 5-hour window", async () => {
   const { client } = setup([{ files: [file("claude", "one@example.com")] }, ok({
     five_hour: null, seven_day: { utilization: 41, resets_at: "2026-11-05T00:00:00Z" }, seven_day_omelette: null,
   }), ok({ account: { has_claude_max: true }, organization: { rate_limit_tier: "default_claude_max_20x" } })]);
   const [account] = await client.listAccounts();
   const data: any = await client.fetchUsage(account.id);
-  assert.equal(data.five_hour.utilization, 0);
-  assert.equal(data.five_hour.resets_at, null);
+  assert.equal("five_hour" in data, false);
   assert.equal(data.seven_day.utilization, 41);
+});
+
+test("CPA keeps polling Claude when the weekly window is null or only in limits[]", async () => {
+  const { client } = setup([{ files: [file("claude", "one@example.com")] },
+    ok({ seven_day: null }), ok({}),
+    ok({ limits: [{ kind: "weekly_all", percent: 12, resets_at: "2026-11-05T00:00:00Z" }] }), ok({})]);
+  const [account] = await client.listAccounts();
+  const idle: any = await client.fetchUsage(account.id);
+  assert.equal(idle.seven_day.utilization, 0);
+  const fromLimits: any = await client.fetchUsage(account.id);
+  assert.equal(fromLimits.seven_day.utilization, 12);
+  assert.equal(fromLimits.seven_day.resets_at, "2026-11-05T00:00:00Z");
 });
 
 test("CPA still rejects a Claude body with no quota windows at all", async () => {
   const { client } = setup([{ files: [file("claude", "one@example.com")] }, ok({ error: { type: "x" } })]);
   const [account] = await client.listAccounts();
-  await assert.rejects(client.fetchUsage(account.id), /missing quota windows/);
+  await assert.rejects(client.fetchUsage(account.id), /missing the weekly window/);
 });
