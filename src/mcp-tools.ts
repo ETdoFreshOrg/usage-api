@@ -31,7 +31,7 @@ const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: 
 export const tools = [
   {
     name: "list_accounts",
-    description: "Every Claude and Codex account usage-api is tracking, with weekly usage %, when the week resets, how far ahead or behind an even pace it is, Codex's 5-hour window, whether the numbers are fresh, and the account's status on the CLIProxyAPI proxy. Also lists accounts that are paused (disabled) on the proxy, and which other providers (Z.ai, OpenRouter, OpenAI, Jev) have data. Read-only.",
+    description: "Every Claude and Codex account usage-api is tracking, with weekly usage %, when the week resets, how far ahead or behind an even pace it is, Codex's 5-hour window, how many reset credits each account has (count only; nothing here uses one), whether the numbers are fresh, and the account's status on the CLIProxyAPI proxy. Also lists accounts that are paused (disabled) on the proxy, and which other providers (Z.ai, OpenRouter, OpenAI, Jev) have data. Read-only.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
       provider: { type: "string", enum: ["claude", "codex"], description: "Only this provider's accounts. Omit for both." },
     } },
@@ -124,7 +124,11 @@ export function summarizeAccount(key: string, p: ProviderSnapshot, now = Date.no
     weekly: d ? windowSummary(d.seven_day, now) : null,
     ...(family === "codex" ? { five_hour: d ? windowSummary(d.five_hour, now) : null } : {}),
     ...(Object.keys(perModel).length ? { weekly_by_model: perModel } : {}),
-    reset_credits_available: num(d?.reset_credits?.available_count),
+    // Read-only count of reset credits; nothing here can use one.
+    reset_credits: d?.reset_credits ? {
+      available: num(d.reset_credits.available_count) ?? 0,
+      next_expires_at: d.reset_credits.next_expires_at ?? null,
+    } : null,
     status: status(p),
   };
 }
@@ -160,6 +164,7 @@ export function suggest(list: ReturnType<typeof summarizeAccount>[]) {
       weekly_resets_at: weekly?.resets_at ?? null,
       spare_percent_per_day: weekly && days ? round(weekly.remaining_percent / days) : null,
       pace_slack: weekly?.pace_slack ?? null,
+      reset_credits_available: a.reset_credits?.available ?? null,
       data_staleness: a.status.staleness,
     };
   });
@@ -190,7 +195,7 @@ export async function callTool(name: string, rawArgs: unknown, ctx: ToolContext)
         accounts: accounts(ctx, provider),
         paused_on_proxy: paused === null ? null : paused.filter(a => !provider || a.provider === provider),
         other_providers: provider ? [] : others,
-        notes: "Claude has only a weekly limit. Codex has weekly and 5-hour windows. pace_slack > 0 means under an even pace for the week. paused_on_proxy is null when the proxy list is unavailable.",
+        notes: "reset_credits.available is a read-only count; no tool can use a reset. Claude has only a weekly limit. Codex has weekly and 5-hour windows. pace_slack > 0 means under an even pace for the week. paused_on_proxy is null when the proxy list is unavailable.",
       });
     }
     if (name === "get_usage") {

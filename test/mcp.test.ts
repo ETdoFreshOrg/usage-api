@@ -13,7 +13,8 @@ const NOW = Date.parse("2026-11-01T06:00:00Z");
 const hoursFromNow = (h: number) => new Date(NOW + h * 3_600_000).toISOString();
 
 const providers: Record<string, any> = {
-  claude: { data: { seven_day: { utilization: 49, resets_at: hoursFromNow(48), expected_percent: 71, slack: 22 }, seven_day_fable: { utilization: 10, resets_at: hoursFromNow(48) }, subscription_type: "Max 20x" },
+  claude: { data: { seven_day: { utilization: 49, resets_at: hoursFromNow(48), expected_percent: 71, slack: 22 }, seven_day_fable: { utilization: 10, resets_at: hoursFromNow(48) }, subscription_type: "Max 20x",
+    reset_credits: { available_count: 2, next_expires_at: hoursFromNow(72), credits: [] } },
     fetchedAt: hoursFromNow(-0.05), ageSec: 180, staleness: "fresh", error: null, account: { id: "a1", name: "one@example.com", family: "claude" } },
   claude3: { data: { seven_day: { utilization: 2, resets_at: hoursFromNow(150) }, subscription_type: "Max 5x" },
     fetchedAt: hoursFromNow(-0.05), ageSec: 180, staleness: "fresh", error: null, account: { id: "a3", name: "three@example.com", family: "claude" } },
@@ -114,6 +115,8 @@ test("signed-in client lists read-only tools and reads usage", async () => {
     assert.equal(claude.weekly.pace_slack, 22);
     assert.equal(claude.weekly_by_model.fable.used_percent, 10);
     assert.equal("five_hour" in claude, false);
+    assert.deepEqual(claude.reset_credits, { available: 2, next_expires_at: hoursFromNow(72) });
+    assert.equal(accounts.accounts[1].reset_credits, null);
     assert.deepEqual(claude.proxy, { enabled: true, status: "active", unavailable: false });
     assert.equal("proxy" in accounts.accounts[1], false);
     assert.deepEqual(accounts.paused_on_proxy, [{ provider: "claude", email: "paused@example.com" }]);
@@ -125,6 +128,7 @@ test("signed-in client lists read-only tools and reads usage", async () => {
     const ranking = (await call(s.base, tokens.access_token, "suggest_account")).structuredContent.ranking;
     assert.deepEqual(ranking.map((r: any) => r.account), ["claude3", "claude", "codex", "claude4"]);
     assert.equal(ranking.find((r: any) => r.account === "codex").blocked_reason, "5-hour limit reached");
+    assert.equal(ranking.find((r: any) => r.account === "claude").reset_credits_available, 2);
     assert.equal(ranking.find((r: any) => r.account === "claude4").blocked_reason, "weekly limit reached");
 
     const detail = (await call(s.base, tokens.access_token, "get_usage", { account: "codex" })).structuredContent;

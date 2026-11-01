@@ -69,7 +69,7 @@ credits or change CLIProxyAPI.
 
 | Tool | What it returns |
 | --- | --- |
-| `list_accounts(provider?)` | Each Claude/Codex account: weekly %, reset time, pace, Codex 5-hour window, freshness, proxy status; accounts paused on the proxy; other providers with data |
+| `list_accounts(provider?)` | Each Claude/Codex account: weekly %, reset time, pace, Codex 5-hour window, reset-credit count (read-only), freshness, proxy status; accounts paused on the proxy; other providers with data |
 | `get_usage(account)` | Full detail for one key (`claude3`, `codex`, `zai`, ...) |
 | `suggest_account(provider?)` | Accounts ranked by room for more work (blocked last) |
 | `usage_history(account, days?, granularity?)` | Weekly (and Codex 5-hour) % over time |
