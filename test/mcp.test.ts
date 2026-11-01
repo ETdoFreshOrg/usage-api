@@ -92,6 +92,8 @@ test("/mcp requires OAuth and consent needs the owner key", async () => {
     const as = await (await fetch(s.base + "/.well-known/oauth-authorization-server")).json();
     assert.deepEqual(as.scopes_supported, ["usage.read"]);
     assert.equal(as.token_endpoint, origin + "/mcp/oauth/token");
+    const padded = await signIn(s.base, "  " + ownerKey + "\n");
+    assert.equal(padded.status, 302);
     const bad = await signIn(s.base, "wrong");
     assert.equal(bad.status, 401);
     assert.match(bad.html, /Read-only/);

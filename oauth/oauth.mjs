@@ -1,4 +1,5 @@
-// Copied unchanged from ETdoFreshOrg/imessage-mcp server/oauth (same single-owner OAuth module).
+// Copied from ETdoFreshOrg/imessage-mcp server/oauth (same single-owner OAuth module).
+// Only change: the pasted owner key is trimmed, so a stray space or newline from copying doesn't deny consent.
 // Copied unchanged from ETdoFreshOrg/memory-database mcp/oauth/oauth.mjs (commit bf1959f),
 // which took it from ETdoFreshOrg/etcode services/mcp-oauth.
 // Shared single-owner OAuth 2.1 authorization + resource server for ETcode MCP services.
@@ -187,7 +188,7 @@ export function installOAuth(app,{deps,ownerKey,origin,resourcePath='/mcp',oauth
   const record=pending.get(hash(id));
   const cookie=(req.get('cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith(cookieName+'='))?.split('=')[1]||'';
   if(!record||!equal(hash(cookie),record.csrfHash)||req.get('origin')!==origin)return res.status(403).json({error:'Invalid or expired consent request'});
-  if(req.body.decision!=='deny'&&(req.body.decision!=='allow'||!equal(req.body.owner_key,ownerKey)))return res.status(401).json({error:'Authorization denied'});
+  if(req.body.decision!=='deny'&&(req.body.decision!=='allow'||!equal(String(req.body.owner_key||'').trim(),ownerKey)))return res.status(401).json({error:'Authorization denied'});
   pending.delete(hash(id));res.clearCookie(cookieName,{secure:true,httpOnly:true,sameSite:'lax',path:consentPath});
   const target=new URL(record.params.redirectUri);target.searchParams.set('iss',issuer);if(record.params.state)target.searchParams.set('state',record.params.state);
   if(req.body.decision==='deny')target.searchParams.set('error','access_denied');
