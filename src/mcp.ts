@@ -16,6 +16,9 @@ import { OAuthStore } from "../oauth/oauth-store.mjs";
 import { tools, callTool, SCOPE, type ToolContext } from "./mcp-tools.js";
 
 export const CLAUDE_CLIENT_ID = "usage-claude";
+// ET Bot (etbot.etdofresh.com) names itself by its client metadata URL. It is pre-registered with its
+// one exact callback, so the document is never fetched and no other ET Bot callback is accepted.
+export const ETBOT_CLIENT = { client_id: "https://etbot.etdofresh.com/oauth/client-metadata.json", client_name: "ET Bot", redirect_uris: ["https://etbot.etdofresh.com/api/connectors/oauth/callback"] };
 export const OAUTH_PATH = "/mcp/oauth";
 const VERSION = "0.1.0";
 
@@ -54,7 +57,7 @@ export function installMcp(app: express.Express, opts: McpOptions) {
   const oauth = installOAuth(app as any, {
     deps, ownerKey: opts.ownerKey, origin: publicOrigin, oauthPath: OAUTH_PATH, scopes: [SCOPE], defaultScopes: [SCOPE],
     resourceName: "usage-api", firstParty: false, chatgpt: true, claude: true,
-    clients: [{ client_id: CLAUDE_CLIENT_ID, client_name: "Claude", redirect_uris: claudeRedirects }],
+    clients: [{ client_id: CLAUDE_CLIENT_ID, client_name: "Claude", redirect_uris: claudeRedirects }, ETBOT_CLIENT],
     renderConsent: defaultConsentPage(consent), cookieName: "usage_oauth_csrf",
     store: opts.store ?? new OAuthStore(), grantTtl: opts.grantTtl ?? defaultGrantTtl,
     ...(opts.fetchClientMetadata ? { fetchClientMetadata: opts.fetchClientMetadata } : {}),

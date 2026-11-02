@@ -3,7 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import express from "express";
-import { installMcp, CLAUDE_CLIENT_ID, OAUTH_PATH } from "../src/mcp.js";
+import { installMcp, CLAUDE_CLIENT_ID, ETBOT_CLIENT, OAUTH_PATH } from "../src/mcp.js";
 import { suggest, summarizeAccount, type ToolContext } from "../src/mcp-tools.js";
 
 const origin = "https://usage.etdofresh.com";
@@ -56,9 +56,9 @@ async function start(withKey = true) {
 const form = (base: string, path: string, body: Record<string, string>, headers: Record<string, string> = {}) =>
   fetch(base + path, { method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", ...headers }, body: new URLSearchParams(body) });
 const pkce = () => { const verifier = randomBytes(32).toString("base64url"); return { verifier, challenge: createHash("sha256").update(verifier).digest("base64url") }; };
-async function signIn(base: string, key = ownerKey) {
+async function signIn(base: string, key = ownerKey, clientId = CLAUDE_CLIENT_ID, redirectUri = claudeRedirect) {
   const { verifier, challenge } = pkce();
-  const params = new URLSearchParams({ client_id: CLAUDE_CLIENT_ID, redirect_uri: claudeRedirect, resource: origin + "/mcp", response_type: "code", code_challenge: challenge, code_challenge_method: "S256", state: "s1" });
+  const params = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, resource: origin + "/mcp", response_type: "code", code_challenge: challenge, code_challenge_method: "S256", state: "s1" });
   const page = await fetch(base + OAUTH_PATH + "/authorize?" + params, { redirect: "manual" });
   assert.equal(page.status, 200);
   const html = await page.text();
@@ -66,7 +66,7 @@ async function signIn(base: string, key = ownerKey) {
     { Origin: origin, Cookie: page.headers.get("set-cookie")!.split(";")[0] });
   if (consent.status !== 302) return { status: consent.status, html, tokens: null as any };
   const code = new URL(consent.headers.get("location")!).searchParams.get("code")!;
-  const tokens = await (await form(base, OAUTH_PATH + "/token", { grant_type: "authorization_code", client_id: CLAUDE_CLIENT_ID, code, code_verifier: verifier, redirect_uri: claudeRedirect, resource: origin + "/mcp" })).json();
+  const tokens = await (await form(base, OAUTH_PATH + "/token", { grant_type: "authorization_code", client_id: clientId, code, code_verifier: verifier, redirect_uri: redirectUri, resource: origin + "/mcp" })).json();
   return { status: 302, html, tokens };
 }
 const rpc = (base: string, token: string | null, method: string, params = {}) => fetch(base + "/mcp", { method: "POST",
@@ -97,6 +97,20 @@ test("/mcp requires OAuth and consent needs the owner key", async () => {
     const bad = await signIn(s.base, "wrong");
     assert.equal(bad.status, 401);
     assert.match(bad.html, /Read-only/);
+  } finally { await s.close(); }
+});
+
+test("ET Bot signs in through owner consent at its one registered callback only", async () => {
+  const s = await start();
+  try {
+    const etbot = await signIn(s.base, ownerKey, ETBOT_CLIENT.client_id, ETBOT_CLIENT.redirect_uris[0]);
+    assert.equal(etbot.status, 302);
+    assert.match(etbot.html, /Authorize ET Bot/);
+    assert.equal((await rpc(s.base, etbot.tokens.access_token, "tools/list")).status, 200);
+    for (const redirectUri of ["https://etbot.etdofresh.com/api/connectors/oauth/other", "https://evil.example/api/connectors/oauth/callback"]) {
+      const params = new URLSearchParams({ client_id: ETBOT_CLIENT.client_id, redirect_uri: redirectUri, resource: origin + "/mcp", response_type: "code", code_challenge: pkce().challenge, code_challenge_method: "S256", state: "s1" });
+      assert.equal((await fetch(s.base + OAUTH_PATH + "/authorize?" + params, { redirect: "manual" })).status, 400, redirectUri);
+    }
   } finally { await s.close(); }
 });
 
