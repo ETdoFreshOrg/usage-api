@@ -66,6 +66,11 @@ Codex usage exposes semantic `five_hour` and `seven_day` windows. Either may be
 `secondary` fields remain as compatibility aliases for `five_hour` and
 `seven_day`; they do not mirror OpenAI's variable raw slot positions.
 
+Claude usage also has `five_hour` (`utilization`, `resets_at`, plus pacing
+`expected_percent` / `slack` over a 5-hour window). Only some Claude accounts
+have a 5-hour limit, so it is `null` for accounts without one, while no session
+is open, and once its reset time has passed; never read `null` as 0%.
+
 ## Subscription renewal dates
 
 Each Claude/Codex account can carry a manually entered next billing date.
@@ -108,10 +113,10 @@ credits or change CLIProxyAPI.
 
 | Tool | What it returns |
 | --- | --- |
-| `list_accounts(provider?)` | Each Claude/Codex account: weekly %, reset time, pace, Codex 5-hour window, reset-credit count (read-only), freshness, proxy status; accounts paused on the proxy; other providers with data |
+| `list_accounts(provider?)` | Each Claude/Codex account: weekly %, reset time, pace, 5-hour window (Codex, and Claude accounts that have one; `null` otherwise), reset-credit count (read-only), freshness, proxy status; accounts paused on the proxy; other providers with data |
 | `get_usage(account)` | Full detail for one key (`claude3`, `codex`, `zai`, ...) |
 | `suggest_account(provider?)` | Accounts ranked by room for more work (blocked last) |
-| `usage_history(account, days?, granularity?)` | Weekly (and Codex 5-hour) % over time |
+| `usage_history(account, days?, granularity?)` | Weekly (and 5-hour, where the account has one) % over time |
 | `recent_requests(hours?)` | Per-account request/error/token counts from CPA Manager, plus the latest 20 requests |
 
 Sign-in uses the single-owner OAuth module shared with imessage-mcp and
@@ -144,12 +149,14 @@ The website supports all account cards and history series automatically.
 CLIProxyAPI keeps the rate-limit headers from each account's latest real
 request (`quota.signals` / `quota.observed_at` in `/v0/management/auth-files`),
 which usage-api already reads every 30 s for account discovery. Anthropic's
-`anthropic-ratelimit-unified-7d-*` and OpenAI's `x-codex-{primary,secondary}-*`
-headers carry the account's current weekly (and Codex 5-hour) usage, so these
+`anthropic-ratelimit-unified-{7d,5h}-*` and OpenAI's `x-codex-{primary,secondary}-*`
+headers carry the account's current weekly (and 5-hour) usage, so these
 numbers are used whenever they are newer than the last active check
 (`dataSource: "passive"`). Codex windows are classified by
 `window-minutes`, not header slot (promax reports its weekly window as
-`primary`). Headers round down, so within the same window the higher of the
+`primary`). Claude headers for an account with no 5-hour limit (or that
+has hit its weekly limit) carry no `5h` fields; the last active check's
+`five_hour` is kept then. Headers round down, so within the same window the higher of the
 passive and last active value is shown.
 
 Headers do not carry Fable/Design windows, Spark, Claude plan labels or reset
@@ -159,7 +166,9 @@ credits; those come from the active check (`/api/oauth/usage`,
 - every 60 min (`ACCOUNT_BUSY_SECONDS`) while passive data is < 30 min old
   (`ACCOUNT_PASSIVE_FRESH_SECONDS`), every 30 min (`ACCOUNT_IDLE_SECONDS`)
   otherwise, to catch use outside CPA
-- once, 90 s after any known window reset (`ACCOUNT_AFTER_RESET_SECONDS`)
+- once, 90 s after any known window reset (`ACCOUNT_AFTER_RESET_SECONDS`),
+  except Claude's 5-hour window: it rolls several times a day and a reset only
+  means no session is open, so it is shown as `null` without a check
 - on 429: 15 min doubling up to 6 h (`ACCOUNT_429_BASE_SECONDS` /
   `ACCOUNT_429_MAX_SECONDS`), never sooner than `Retry-After`, and the normal
   cadence only resumes after a success; other errors back off from 2 min

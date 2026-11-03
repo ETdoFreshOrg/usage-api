@@ -32,7 +32,7 @@ const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: 
 export const tools = [
   {
     name: "list_accounts",
-    description: "Every Claude and Codex account usage-api is tracking, with weekly usage %, when the week resets, how far ahead or behind an even pace it is, Codex's 5-hour window, how many reset credits each account has (count only; nothing here uses one), the next subscription renewal date (set manually on usage-api; null if unknown), whether the numbers are fresh, and the account's status on the CLIProxyAPI proxy. Also lists accounts that are paused (disabled) on the proxy, and which other providers (Z.ai, OpenRouter, OpenAI, Jev) have data. Read-only.",
+    description: "Every Claude and Codex account usage-api is tracking, with weekly usage %, when the week resets, how far ahead or behind an even pace it is, the 5-hour window (Codex, and Claude accounts that have one; null otherwise), how many reset credits each account has (count only; nothing here uses one), the next subscription renewal date (set manually on usage-api; null if unknown), whether the numbers are fresh, and the account's status on the CLIProxyAPI proxy. Also lists accounts that are paused (disabled) on the proxy, and which other providers (Z.ai, OpenRouter, OpenAI, Jev) have data. Read-only.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
       provider: { type: "string", enum: ["claude", "codex"], description: "Only this provider's accounts. Omit for both." },
     } },
@@ -56,7 +56,7 @@ export const tools = [
   },
   {
     name: "usage_history",
-    description: "How one account's weekly usage % (and Codex's 5-hour %) moved over recent days, from usage-api's history. Read-only.",
+    description: "How one account's weekly usage % (and 5-hour %, where the account has one) moved over recent days, from usage-api's history. Read-only.",
     inputSchema: { type: "object", additionalProperties: false, required: ["account"], properties: {
       account: { type: "string", description: "Account key from list_accounts, such as claude or codex2." },
       days: { type: "integer", minimum: 1, maximum: 30, default: 7, description: "How many days back (1-30)." },
@@ -123,7 +123,8 @@ export function summarizeAccount(key: string, p: ProviderSnapshot, now = Date.no
     email: p.account?.name ?? null,
     plan: d?.subscription_type ?? d?.plan_type ?? null,
     weekly: d ? windowSummary(d.seven_day, now) : null,
-    ...(family === "codex" ? { five_hour: d ? windowSummary(d.five_hour, now) : null } : {}),
+    // null when the account has no 5-hour window (many Claude accounts) or none is open.
+    five_hour: d ? windowSummary(d.five_hour, now) : null,
     ...(Object.keys(perModel).length ? { weekly_by_model: perModel } : {}),
     // Read-only count of reset credits; nothing here can use one.
     reset_credits: d?.reset_credits ? {
@@ -198,7 +199,7 @@ export async function callTool(name: string, rawArgs: unknown, ctx: ToolContext)
         accounts: accounts(ctx, provider),
         paused_on_proxy: paused === null ? null : paused.filter(a => !provider || a.provider === provider),
         other_providers: provider ? [] : others,
-        notes: "reset_credits.available is a read-only count; no tool can use a reset. Claude has only a weekly limit. Codex has weekly and 5-hour windows. pace_slack > 0 means under an even pace for the week. renewal is the next subscription billing date (America/Chicago calendar date) entered by hand, or null if unset. paused_on_proxy is null when the proxy list is unavailable.",
+        notes: "reset_credits.available is a read-only count; no tool can use a reset. Codex and some Claude accounts have a 5-hour window as well as the weekly one; five_hour is null for accounts without one (or with no open session). pace_slack > 0 means under an even pace for the week. renewal is the next subscription billing date (America/Chicago calendar date) entered by hand, or null if unset. paused_on_proxy is null when the proxy list is unavailable.",
       });
     }
     if (name === "get_usage") {
@@ -219,9 +220,7 @@ export async function callTool(name: string, rawArgs: unknown, ctx: ToolContext)
       if (granularity !== "hourly" && granularity !== "daily") return fail("invalid_argument", "granularity must be hourly or daily.");
       const cutoff = now - days * 86_400_000;
       const series = ctx.getHistory(granularity).series
-        .filter(s => s.provider === args.account
-          // Claude's retired 5-hour window can still be in old history; only Codex has one now.
-          && (s.metric === "seven_day" || (s.metric === "five_hour" && args.account.startsWith("codex"))))
+        .filter(s => s.provider === args.account && (s.metric === "seven_day" || s.metric === "five_hour"))
         .map(s => ({ metric: s.metric === "seven_day" ? "weekly" : "five_hour",
           points: s.points.filter(pt => Date.parse(pt.t) >= cutoff).slice(-400)
             .map(pt => ({ t: pt.t, used_percent: pt.value, ...(pt.expectedValue === undefined ? {} : { expected_percent: pt.expectedValue }) })) }));

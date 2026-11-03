@@ -81,14 +81,18 @@ test("optional reset-credit failures preserve successful Codex usage and expose 
   assert.ok(calls.every(c => c.body?.method !== "POST"));
 });
 
-test("CPA reports Claude weekly usage only and ignores the retired 5-hour window", async () => {
+test("CPA reports Claude's 5-hour window when the account has one and null when it does not", async () => {
   const { client } = setup([{ files: [file("claude", "one@example.com")] }, ok({
     five_hour: null, seven_day: { utilization: 41, resets_at: "2026-11-05T00:00:00Z" }, seven_day_omelette: null,
-  }), ok({ account: { has_claude_max: true }, organization: { rate_limit_tier: "default_claude_max_20x" } })]);
+  }), ok({ account: { has_claude_max: true }, organization: { rate_limit_tier: "default_claude_max_20x" } }),
+  ok({ five_hour: { utilization: 99, resets_at: "2026-11-03T23:30:00Z" }, seven_day: { utilization: 73, resets_at: "2026-11-06T01:00:00Z" } })]);
   const [account] = await client.listAccounts();
-  const data: any = await client.fetchUsage(account.id);
-  assert.equal("five_hour" in data, false);
-  assert.equal(data.seven_day.utilization, 41);
+  const none: any = await client.fetchUsage(account.id);
+  assert.equal(none.five_hour, null);
+  assert.equal(none.seven_day.utilization, 41);
+  // The plan label is cached, so the second check is a single upstream call.
+  const session: any = await client.fetchUsage(account.id);
+  assert.deepEqual(session.five_hour, { utilization: 99, resets_at: "2026-11-03T23:30:00Z" });
 });
 
 test("CPA keeps polling Claude when the weekly window is null or only in limits[]", async () => {

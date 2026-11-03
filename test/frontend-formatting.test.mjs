@@ -58,6 +58,7 @@ test("history graph exposes all known provider series with preferred color famil
     .map((match) => ({ key: match[1], label: match[2], color: match[3], default: match[4] === "true" }));
 
   assert.deepEqual(options, [
+    { key: "claude:five_hour", label: "Claude Code 5-hour", color: "#f97316", default: true },
     { key: "claude:seven_day", label: "Claude Code 7-day", color: "#fb923c", default: true },
     { key: "claude:seven_day_sonnet", label: "Claude Sonnet 7-day", color: "#fdba74", default: false },
     { key: "claude:seven_day_opus", label: "Claude Opus 7-day", color: "#ea580c", default: false },
@@ -73,6 +74,7 @@ test("history graph exposes all known provider series with preferred color famil
     { key: "codex2:GPT-5.3-Codex-Spark seven_day", label: "Codex #2 Spark 7-day", color: "#c4b5fd", default: false },
     { key: "zai:five_hour", label: "ZAI 5-hour", color: "#a855f7", default: true },
     { key: "zai:monthly", label: "ZAI monthly", color: "#d8b4fe", default: false },
+    { key: "claude2:five_hour", label: "Claude #2 Code 5-hour", color: "#f59e0b", default: true },
     { key: "claude2:seven_day", label: "Claude #2 Code 7-day", color: "#fbbf24", default: true },
     { key: "claude2:seven_day_sonnet", label: "Claude #2 Sonnet 7-day", color: "#fcd34d", default: false },
     { key: "claude2:seven_day_opus", label: "Claude #2 Opus 7-day", color: "#d97706", default: false },
@@ -268,4 +270,8 @@ test("account cards show the manual renewal date", () => {
   const out = sandbox.fmtRenewal({ renews_at: "2026-11-10", billing_cycle: "monthly", days_until_renewal: 7, source: "manual" });
   assert.match(out, /renews in 7d \(.*2026.*\) · monthly/);
   assert.match(sandbox.fmtRenewal({ renews_at: "2026-11-03", billing_cycle: "yearly", days_until_renewal: 0 }), /renews today/);
+});
+
+test("Claude card shows a 5-hour row only when the account reports one", () => {
+  assert.match(html, /\$\{sub\("5-hour", d\.five_hour\)\}/);
 });

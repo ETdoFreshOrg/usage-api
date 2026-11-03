@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mergePassive, parsePassiveCodex, readObservation } from "../src/passive.js";
+import { mergePassive, parsePassiveClaude, parsePassiveCodex, readObservation } from "../src/passive.js";
 
 const NOW = Date.parse("2026-11-03T19:40:00Z");
 
@@ -40,11 +40,12 @@ test("CPA quota block becomes an observation; empty or missing signals are ignor
   assert.equal(readObservation(null), null);
 });
 
-test("Claude headers replace only the weekly window and keep active-only fields", () => {
+test("Claude headers replace the weekly and 5-hour windows and keep active-only fields", () => {
   const active = { seven_day: { utilization: 55, resets_at: "x" }, seven_day_fable: { utilization: 3, resets_at: null },
     subscription_type: "Max 20x" };
   const merged = mergePassive("claude", active, "2026-11-03T19:00:00Z", readObservation(claudeQuota), NOW);
   assert.deepEqual(merged.seven_day, { utilization: 59, resets_at: "2026-11-06T01:00:00.000Z" });
+  assert.deepEqual(merged.five_hour, { utilization: 19, resets_at: null });
   assert.equal(merged.seven_day_fable.utilization, 3);
   assert.equal(merged.subscription_type, "Max 20x");
 });
@@ -87,4 +88,33 @@ test("headers that round down never show less than the older active check of the
   const lastWeek = mergePassive("claude", { seven_day: { utilization: 95, resets_at: "2026-10-30T01:00:00+00:00" } },
     "2026-11-03T19:00:00Z", obs, NOW);
   assert.equal(lastWeek.seven_day.utilization, 59);
+});
+
+// etdofreshai@gmail.com and etgarcia@uno.edu headers from CPA on 2026-11-03 (trimmed).
+const claude5hQuota = { observed_at: "2026-11-03T16:38:24.562071781-06:00", signals: {
+  "Anthropic-Ratelimit-Unified-5h-Reset": "1793748600", "Anthropic-Ratelimit-Unified-5h-Status": "allowed_warning",
+  "Anthropic-Ratelimit-Unified-5h-Utilization": "0.99",
+  "Anthropic-Ratelimit-Unified-7d-Reset": "1793926800", "Anthropic-Ratelimit-Unified-7d-Utilization": "0.73" } };
+const claudeWeeklyOnlyQuota = { observed_at: "2026-11-03T10:52:17.362713179-06:00", signals: {
+  "Anthropic-Ratelimit-Unified-7d-Reset": "1793930400", "Anthropic-Ratelimit-Unified-7d-Status": "rejected",
+  "Anthropic-Ratelimit-Unified-7d-Utilization": "1.0" } };
+
+test("Claude 5h headers become five_hour; accounts without them report null, not 0%", () => {
+  const p = parsePassiveClaude(readObservation(claude5hQuota)!)!;
+  assert.deepEqual(p.five_hour, { utilization: 99, resets_at: "2026-11-03T23:30:00.000Z" });
+  assert.equal(p.seven_day.utilization, 73);
+  const weeklyOnly = parsePassiveClaude(readObservation(claudeWeeklyOnlyQuota)!)!;
+  assert.equal(weeklyOnly.five_hour, null);
+  assert.equal(mergePassive("claude", { seven_day: { utilization: 99, resets_at: null } }, "2026-11-03T16:00:00Z",
+    readObservation(claudeWeeklyOnlyQuota), Date.parse("2026-11-03T17:00:00Z")).five_hour, null);
+});
+
+test("Claude headers without a 5h window keep the active check's 5h window; headers that round down never lower it", () => {
+  const now = Date.parse("2026-11-03T22:40:00Z");
+  const active = { five_hour: { utilization: 100, resets_at: "2026-11-03T23:30:00.368Z" }, seven_day: { utilization: 73, resets_at: null } };
+  const kept = mergePassive("claude", active, "2026-11-03T16:00:00Z", readObservation(claudeWeeklyOnlyQuota),
+    Date.parse("2026-11-03T17:00:00Z"));
+  assert.deepEqual(kept.five_hour, active.five_hour);
+  const higher = mergePassive("claude", active, "2026-11-03T22:00:00Z", readObservation(claude5hQuota), now);
+  assert.equal(higher.five_hour.utilization, 100);
 });

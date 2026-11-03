@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseClaudeResetCredits, parseClaudeUsage } from "../src/providers/anthropic.ts";
+import { openFiveHour, parseClaudeResetCredits, parseClaudeUsage } from "../src/providers/anthropic.ts";
 
 test("parseClaudeUsage reads model-scoped weekly limits (Fable) from limits[]", () => {
   const usage = parseClaudeUsage({
@@ -28,7 +28,7 @@ test("parseClaudeUsage reads model-scoped weekly limits (Fable) from limits[]", 
     utilization: 42,
     resets_at: "2026-07-14T14:00:00.114634+00:00",
   });
-  assert.equal("five_hour" in usage, false);
+  assert.deepEqual(usage.five_hour, { utilization: 13, resets_at: "2026-07-12T21:20:00.114410+00:00" });
   assert.equal(usage.seven_day.utilization, 32);
   assert.equal(usage.seven_day_sonnet, null);
   assert.equal(usage.subscription_type, "max");
@@ -84,4 +84,27 @@ test("parseClaudeResetCredits counts grants and ignores ineligible responses", (
   assert.equal(rc?.credits.length, 2);
   assert.equal(parseClaudeResetCredits({ eligible: false, grants: [] }), null);
   assert.equal(parseClaudeResetCredits(undefined), null);
+});
+
+test("parseClaudeUsage reports the 5-hour window only for accounts that have one", () => {
+  // Shapes from live CPA api-call responses on 2026-11-03.
+  const withSession = parseClaudeUsage({ five_hour: { utilization: 6, resets_at: "2026-11-04T03:50:00Z" },
+    seven_day: { utilization: 2, resets_at: "2026-11-05T13:00:00Z" } }, null);
+  assert.deepEqual(withSession.five_hour, { utilization: 6, resets_at: "2026-11-04T03:50:00Z" });
+
+  const none = parseClaudeUsage({ five_hour: null, seven_day: { utilization: 100, resets_at: "2026-11-06T02:00:00Z" },
+    limits: [{ kind: "weekly_all", percent: 100, resets_at: "2026-11-06T02:00:00Z" }] }, null);
+  assert.equal(none.five_hour, null);
+
+  const fromLimits = parseClaudeUsage({ limits: [{ kind: "session", percent: 40, resets_at: "2026-11-04T03:50:00Z" },
+    { kind: "weekly_all", percent: 9, resets_at: "2026-11-05T13:00:00Z" }] }, null);
+  assert.deepEqual(fromLimits.five_hour, { utilization: 40, resets_at: "2026-11-04T03:50:00Z" });
+});
+
+test("openFiveHour drops a missing or already-reset 5-hour window instead of reading 0%", () => {
+  const now = Date.parse("2026-11-03T23:00:00Z");
+  assert.equal(openFiveHour(null, now), null);
+  assert.equal(openFiveHour({ utilization: 99, resets_at: "2026-11-03T22:30:00Z" }, now), null);
+  assert.deepEqual(openFiveHour({ utilization: 99, resets_at: "2026-11-03T23:30:00Z" }, now), { utilization: 99, resets_at: "2026-11-03T23:30:00Z" });
+  assert.deepEqual(openFiveHour({ utilization: 5, resets_at: null }, now), { utilization: 5, resets_at: null });
 });
