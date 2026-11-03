@@ -45,15 +45,21 @@ Returns per-provider:
   A failed poll keeps the last good value here instead of clearing it; it is
   also saved to `usage-last.json` beside the history file (`USAGE_LAST_FILE`)
   so it survives restarts.
-- `fetchedAt` — ISO date-time of the fetch that produced `data`
+- `fetchedAt` — ISO date-time the numbers in `data` were true (for Claude/Codex
+  accounts this is the observed request time when `dataSource` is `passive`)
 - `lastAttemptAt` — ISO date-time of the latest poll, success or failure
 - `ageSec` — seconds since `fetchedAt`
 - `staleness` — `fresh` (< 5 min), `little_stale` (< 1 h), or `stale`; tune
-  with `STALE_LITTLE_SECONDS` / `STALE_SECONDS`. Clients should use this
-  rather than their own age rules.
+  with `STALE_LITTLE_SECONDS` / `STALE_SECONDS`. Claude/Codex accounts use
+  45 min / 3 h instead (`ACCOUNT_STALE_LITTLE_SECONDS` /
+  `ACCOUNT_STALE_SECONDS`), since idle accounts are checked every 30 min.
+  Clients should use this rather than their own age rules.
 - `error` — null when the latest poll succeeded
 - `intervalSec` — current polling interval (self-tunes)
 - `nextFetchAt` — when the next refresh fires
+- Claude/Codex accounts also have `dataSource` (`passive` | `active`),
+  `observedAt` (latest CPA header observation) and `activeFetchedAt` (latest
+  successful usage-endpoint check); see below.
 
 Codex usage exposes semantic `five_hour` and `seven_day` windows. Either may be
 `null` when OpenAI is not reporting that limit. The deprecated `primary` and
@@ -133,7 +139,36 @@ every 30 s; `null` when unset or when accounts come from 9router); clients can u
 the ID to persist visibility preferences.
 The website supports all account cards and history series automatically.
 
-Each provider runs an independent `Poller`:
+### Claude/Codex accounts: passive first, active as backup
+
+CLIProxyAPI keeps the rate-limit headers from each account's latest real
+request (`quota.signals` / `quota.observed_at` in `/v0/management/auth-files`),
+which usage-api already reads every 30 s for account discovery. Anthropic's
+`anthropic-ratelimit-unified-7d-*` and OpenAI's `x-codex-{primary,secondary}-*`
+headers carry the account's current weekly (and Codex 5-hour) usage, so these
+numbers are used whenever they are newer than the last active check
+(`dataSource: "passive"`). Codex windows are classified by
+`window-minutes`, not header slot (promax reports its weekly window as
+`primary`). Headers round down, so within the same window the higher of the
+passive and last active value is shown.
+
+Headers do not carry Fable/Design windows, Spark, Claude plan labels or reset
+credits; those come from the active check (`/api/oauth/usage`,
+`/backend-api/wham/usage`), which is now a slow backup:
+
+- every 60 min (`ACCOUNT_BUSY_SECONDS`) while passive data is < 30 min old
+  (`ACCOUNT_PASSIVE_FRESH_SECONDS`), every 30 min (`ACCOUNT_IDLE_SECONDS`)
+  otherwise, to catch use outside CPA
+- once, 90 s after any known window reset (`ACCOUNT_AFTER_RESET_SECONDS`)
+- on 429: 15 min doubling up to 6 h (`ACCOUNT_429_BASE_SECONDS` /
+  `ACCOUNT_429_MAX_SECONDS`), never sooner than `Retry-After`, and the normal
+  cadence only resumes after a success; other errors back off from 2 min
+- on restart, an account whose saved data is recent waits for its normal
+  cadence instead of being re-checked immediately; first checks are staggered
+- Codex reset-credit detail is re-read only when the summary count changes or
+  every 3 h (`CODEX_RESET_CREDITS_SECONDS`); the Claude plan label every 12 h
+
+Z.ai, OpenRouter, OpenAI and Jev each run an independent `Poller`:
 
 - starts at `POLL_TARGET_SECONDS` (default 2.5 min)
 - after 3 consecutive successes, walks toward `POLL_FLOOR_SECONDS` (1 min)

@@ -20,6 +20,10 @@ test("optional second Codex account uses an isolated poller and provider key", (
   // The second account is named by whichever identifier 9router records for
   // it, and only starts when 9router actually has that connection.
   assert.match(server, /key === "codex2" && CODEX2_OFF/);
-  assert.match(server, /new Poller<unknown>\(key/);
+  assert.match(server, /new AccountPoller\(key, family/);
   assert.match(server, /providers\[key\] =/);
+});
+
+test("pacing constants exist before the first account sync can record passive history", () => {
+  assert.ok(server.indexOf("const SEVEN_DAY_MS") < server.indexOf("await syncAccounts();"));
 });

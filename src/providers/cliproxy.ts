@@ -1,4 +1,5 @@
 import { RateLimitError, throwIfRateLimited } from "../cache.js";
+import { PassiveObservation, readObservation } from "../passive.js";
 import { parseClaudeUsage, parseClaudeResetCredits, planLabel, hasWeeklyWindow } from "./anthropic.js";
 import { parseCodexUsage, parseResetCredits } from "./codex.js";
 
@@ -11,11 +12,13 @@ export interface ProxyAccount {
   accountId: string | null;
   /** CPA's routing priority for this account; null when none is set. */
   priority: number | null;
+  /** Rate-limit headers from the account's latest request through CPA (see passive.ts). */
+  observation: PassiveObservation | null;
 }
 
 type AuthFile = {
   id?: string; name?: string; provider?: string; type?: string; email?: string;
-  auth_index?: string; disabled?: boolean; id_token?: unknown; priority?: unknown;
+  auth_index?: string; disabled?: boolean; id_token?: unknown; priority?: unknown; quota?: unknown;
 };
 
 // CPA omits priority when it was never set; a numeric string is accepted in case a build serializes it that way.
@@ -51,11 +54,17 @@ function accountId(value: unknown): string | null {
   } catch { return null; }
 }
 
+// The plan tier almost never changes; re-reading it costs an extra upstream call per check.
+const PROFILE_TTL_MS = 12 * 3_600_000;
+const RESET_DETAIL_TTL_MS = Number(process.env.CODEX_RESET_CREDITS_SECONDS ?? 3 * 3600) * 1000;
+
 export class CliProxyClient {
   private accounts: ProxyAccount[] = [];
   /** Claude/Codex accounts on the proxy, enabled or not, from the last listing (identity and status only, no tokens). */
   proxyAccounts: ProxyAccountStatus[] | null = null;
   private profiles = new Map<string, { at: number; label: string | null }>();
+  /** Codex reset-credit detail per account; re-read only when the summary count changes or it ages out. */
+  private resetDetails = new Map<string, { at: number; count: number; resets: ReturnType<typeof parseResetCredits> }>();
   constructor(private readonly baseUrl: string, private readonly key: string,
     private readonly aliases: Record<string, string> = {}, private readonly fetcher: typeof fetch = fetch) {}
 
@@ -88,7 +97,7 @@ export class CliProxyClient {
       const id = legacy ?? `cpa:${identity}`;
       if (accounts.some(a => a.id === id)) continue;
       accounts.push({ id, provider, email, name: email ?? file.name ?? id, authIndex: file.auth_index, accountId: workspace,
-        priority: priorityOf(file.priority) });
+        priority: priorityOf(file.priority), observation: readObservation(file.quota) });
     }
     this.accounts = accounts;
     this.proxyAccounts = statuses;
@@ -127,7 +136,7 @@ export class CliProxyClient {
       // idle or right after a reset, which is 0% used; only a body without it at all is bad.
       if (!hasWeeklyWindow(raw)) throw new Error("Claude usage response is missing the weekly window");
       let profile = this.profiles.get(id);
-      if (!profile || Date.now() - profile.at > 3_600_000) {
+      if (!profile || Date.now() - profile.at > PROFILE_TTL_MS) {
         try {
           const rawProfile = await this.providerGet(account, "https://api.anthropic.com/api/oauth/profile", headers);
           profile = { at: Date.now(), label: planLabel(rawProfile) };
@@ -145,15 +154,21 @@ export class CliProxyClient {
     let resets = null;
     let resetCheckedAt: string | null = null;
     let resetError: string | null = null;
-    if (raw.rate_limit_reset_credits?.available_count === 0) {
+    const count = raw.rate_limit_reset_credits?.available_count;
+    const cached = this.resetDetails.get(id);
+    if (count === 0) {
       resets = parseResetCredits({ available_count: 0 });
       resetCheckedAt = checkedAt;
+    } else if (cached && cached.count === count && Date.now() - cached.at < RESET_DETAIL_TTL_MS) {
+      resets = cached.resets;
+      resetCheckedAt = new Date(cached.at).toISOString();
     } else {
       try {
         const detail = await this.providerGet(account, "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
           { ...headers, "OpenAI-Beta": "codex-1", Originator: "Codex Desktop" });
         resets = parseResetCredits(detail);
         resetCheckedAt = new Date().toISOString();
+        if (typeof count === "number") this.resetDetails.set(id, { at: Date.now(), count, resets });
       } catch (err) { resetError = err instanceof Error ? err.message : "Reset-credit lookup failed"; }
     }
     return { ...parseCodexUsage(raw), reset_credits: resets, source: "cliproxyapi", checked_at: checkedAt,

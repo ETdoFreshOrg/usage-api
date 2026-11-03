@@ -108,3 +108,21 @@ test("CPA still rejects a Claude body with no quota windows at all", async () =>
   const [account] = await client.listAccounts();
   await assert.rejects(client.fetchUsage(account.id), /missing the weekly window/);
 });
+
+test("Codex reset-credit detail is re-read only when the count changes, and CPA's passive quota is carried", async () => {
+  const usage = (count: number) => ok({ plan_type: "plus", rate_limit: { primary_window: { used_percent: 1,
+    limit_window_seconds: 604800, reset_at: 1800000000 } }, rate_limit_reset_credits: { available_count: count } });
+  const detail = ok({ available_count: 2, credits: [] });
+  const { client, calls } = setup([{ files: [{ ...file("codex", "one@example.com"),
+    quota: { observed_at: "2026-11-03T19:00:00Z", signals: { "X-Codex-Primary-Used-Percent": "4" } } }] },
+    usage(2), detail, usage(2), usage(3), ok({ available_count: 3, credits: [] })]);
+  const [account] = await client.listAccounts();
+  assert.equal(account.observation?.signals["x-codex-primary-used-percent"], "4");
+  await client.fetchUsage(account.id);
+  const cached: any = await client.fetchUsage(account.id);
+  assert.equal(cached.reset_credits.available_count, 2);
+  const changed: any = await client.fetchUsage(account.id);
+  assert.equal(changed.reset_credits.available_count, 3);
+  const detailCalls = calls.filter(c => c.body?.url?.includes("rate-limit-reset-credits")).length;
+  assert.equal(detailCalls, 2);
+});
