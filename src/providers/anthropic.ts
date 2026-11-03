@@ -46,8 +46,10 @@ export interface ClaudeResetCredits {
   credits: ClaudeResetCredit[];
 }
 
-// Claude dropped its 5-hour limit (Nov 2026), so only weekly windows are reported.
 export interface ClaudeUsage {
+  // Only some accounts have a 5-hour limit (Nov 2026): null when the account has none or no
+  // session is open. Never 0% for "absent", so clients can hide it.
+  five_hour: ClaudeWindow | null;
   seven_day: ClaudeWindow;
   seven_day_sonnet: ClaudeWindow | null;
   seven_day_opus: ClaudeWindow | null;
@@ -85,6 +87,17 @@ export interface RawUsageResponse {
   seven_day_opus?: RawWindow;
   seven_day_omelette?: RawWindow;
   limits?: RawLimit[];
+}
+
+/**
+ * A Claude 5-hour window that is still open at `now`, else null. Once it resets no session is open
+ * until the next request (Anthropic then reports null too), so a passed window means "none", not 0%.
+ */
+export function openFiveHour<T extends { utilization?: unknown; resets_at?: string | null }>(
+  w: T | null | undefined, now = Date.now()): T | null {
+  if (!w || typeof w.utilization !== "number") return null;
+  const reset = w.resets_at ? Date.parse(w.resets_at) : NaN;
+  return Number.isFinite(reset) && reset <= now ? null : w;
 }
 
 /** True when a usage body carries the weekly window, directly or as a `weekly_all` limit. */
@@ -139,9 +152,13 @@ export function parseClaudeUsage(
   // Model-scoped weekly windows, keyed by lowercased display name.
   const scoped = new Map<string, ClaudeWindow>();
   let weeklyAll: ClaudeWindow | null = null;
+  // limits[] carries the 5-hour window as kind "session" alongside weekly_all.
+  let session: ClaudeWindow | null = null;
   for (const limit of json.limits ?? []) {
     if (limit?.kind === "weekly_all" && typeof limit.percent === "number")
       weeklyAll = { utilization: limit.percent, resets_at: limit.resets_at ?? null };
+    if (limit?.kind === "session" && typeof limit.percent === "number")
+      session = { utilization: limit.percent, resets_at: limit.resets_at ?? null };
     if (limit?.kind !== "weekly_scoped") continue;
     if (typeof limit.percent !== "number") continue;
     const name = limit.scope?.model?.display_name;
@@ -153,6 +170,7 @@ export function parseClaudeUsage(
   }
 
   return {
+    five_hour: optWin(json.five_hour ?? null) ?? session,
     seven_day: json.seven_day ? win(json.seven_day) : weeklyAll ?? win(null),
     seven_day_sonnet: optWin(json.seven_day_sonnet ?? null) ?? scoped.get("sonnet") ?? null,
     seven_day_opus: optWin(json.seven_day_opus ?? null) ?? scoped.get("opus") ?? null,

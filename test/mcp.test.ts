@@ -13,7 +13,7 @@ const NOW = Date.parse("2026-11-01T06:00:00Z");
 const hoursFromNow = (h: number) => new Date(NOW + h * 3_600_000).toISOString();
 
 const providers: Record<string, any> = {
-  claude: { data: { seven_day: { utilization: 49, resets_at: hoursFromNow(48), expected_percent: 71, slack: 22 }, seven_day_fable: { utilization: 10, resets_at: hoursFromNow(48) }, subscription_type: "Max 20x",
+  claude: { data: { five_hour: { utilization: 100, resets_at: hoursFromNow(1), expected_percent: 80, slack: -20 }, seven_day: { utilization: 49, resets_at: hoursFromNow(48), expected_percent: 71, slack: 22 }, seven_day_fable: { utilization: 10, resets_at: hoursFromNow(48) }, subscription_type: "Max 20x",
     reset_credits: { available_count: 2, next_expires_at: hoursFromNow(72), credits: [] } },
     fetchedAt: hoursFromNow(-0.05), ageSec: 180, staleness: "fresh", error: null, account: { id: "a1", name: "one@example.com", family: "claude" } },
   claude3: { data: { seven_day: { utilization: 2, resets_at: hoursFromNow(150) }, subscription_type: "Max 5x" },
@@ -132,7 +132,8 @@ test("signed-in client lists read-only tools and reads usage", async () => {
     assert.equal(claude.weekly.hours_until_reset, 48);
     assert.equal(claude.weekly.pace_slack, 22);
     assert.equal(claude.weekly_by_model.fable.used_percent, 10);
-    assert.equal("five_hour" in claude, false);
+    assert.deepEqual(claude.five_hour, { used_percent: 100, remaining_percent: 0, resets_at: hoursFromNow(1), hours_until_reset: 1, expected_percent: 80, pace_slack: -20 });
+    assert.equal(accounts.accounts[1].five_hour, null);
     assert.deepEqual(claude.reset_credits, { available: 2, next_expires_at: hoursFromNow(72) });
     assert.equal(accounts.accounts[1].reset_credits, null);
     assert.equal(claude.renewal, null);
@@ -146,7 +147,8 @@ test("signed-in client lists read-only tools and reads usage", async () => {
     assert.deepEqual(codexOnly.accounts.map((a: any) => a.account), ["codex"]);
 
     const ranking = (await call(s.base, tokens.access_token, "suggest_account")).structuredContent.ranking;
-    assert.deepEqual(ranking.map((r: any) => r.account), ["claude3", "claude", "codex", "claude4"]);
+    assert.deepEqual(ranking.map((r: any) => r.account), ["claude3", "codex", "claude", "claude4"]);
+    assert.equal(ranking.find((r: any) => r.account === "claude").blocked_reason, "5-hour limit reached");
     assert.equal(ranking.find((r: any) => r.account === "codex").blocked_reason, "5-hour limit reached");
     assert.equal(ranking.find((r: any) => r.account === "claude").reset_credits_available, 2);
     assert.equal(ranking.find((r: any) => r.account === "claude4").blocked_reason, "weekly limit reached");
@@ -158,7 +160,8 @@ test("signed-in client lists read-only tools and reads usage", async () => {
     assert.equal((await call(s.base, tokens.access_token, "get_usage", { account: "nope" })).isError, true);
 
     const hist = (await call(s.base, tokens.access_token, "usage_history", { account: "claude", days: 7 })).structuredContent;
-    assert.deepEqual(hist.series, [{ metric: "weekly", points: [{ t: hoursFromNow(-2), used_percent: 48, expected_percent: 70 }] }]);
+    assert.deepEqual(hist.series, [{ metric: "weekly", points: [{ t: hoursFromNow(-2), used_percent: 48, expected_percent: 70 }] },
+      { metric: "five_hour", points: [{ t: hoursFromNow(-2), used_percent: 5 }] }]);
 
     const recent = (await call(s.base, tokens.access_token, "recent_requests", { hours: 6 })).structuredContent;
     assert.equal(recent.by_account.window_hours, 6);

@@ -65,10 +65,14 @@ export function accountStaleness(fetchedAt: string | null, now = Date.now()): St
   return age >= ACCOUNT_TIMING.staleSec ? "stale" : age >= ACCOUNT_TIMING.littleStaleSec ? "little_stale" : "fresh";
 }
 
-/** Reset times present in Claude/Codex data (ISO strings), for the after-reset check. */
-function resetTimes(data: any): number[] {
+/**
+ * Reset times present in Claude/Codex data (ISO strings), for the after-reset check. Claude's
+ * 5-hour window is left out: once it resets the account simply has no open session (null), which
+ * needs no upstream check, and it rolls several times a day.
+ */
+function resetTimes(data: any, family: string): number[] {
   if (!data || typeof data !== "object") return [];
-  const windows = [data.seven_day, data.five_hour, data.seven_day_fable, data.seven_day_design,
+  const windows = [data.seven_day, family === "claude" ? null : data.five_hour, data.seven_day_fable, data.seven_day_design,
     ...(Array.isArray(data.additional) ? data.additional.flatMap((a: any) => [a?.five_hour, a?.seven_day]) : [])];
   return windows.map(w => Date.parse(w?.resets_at ?? "")).filter(Number.isFinite);
 }
@@ -153,7 +157,7 @@ export class AccountPoller {
     const last = this.lastAttemptAt ? Date.parse(this.lastAttemptAt) : NaN;
     if (!Number.isFinite(last)) return this.nextAt.getTime();
     let due = last + this.baseIntervalSec() * 1000;
-    for (const reset of resetTimes(this.shown().data))
+    for (const reset of resetTimes(this.shown().data, this.family))
       if (reset > last) due = Math.min(due, reset + ACCOUNT_TIMING.afterResetSec * 1000);
     return Math.max(due, this.now());
   }

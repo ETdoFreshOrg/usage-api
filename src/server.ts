@@ -34,7 +34,7 @@ try {
 } catch (err: any) {
   if (err?.code !== "ENOENT") console.warn(`could not read ${ENV_FILE}: ${err?.message ?? err}`);
 }
-import { fetchClaudeUsage } from "./providers/anthropic.js";
+import { fetchClaudeUsage, openFiveHour } from "./providers/anthropic.js";
 import { fetchCodexUsage } from "./providers/codex.js";
 import { listConnections } from "./providers/ninerouter.js";
 import { fetchZaiUsage } from "./providers/zai.js";
@@ -242,12 +242,13 @@ function enrichClaude(snap: { data?: any }) {
   const d = snap.data;
   const enrichSeven = <T extends { utilization: number; resets_at: string | null } | null>(w: T): T =>
     (w ? { ...w, ...pacing(w.utilization, w.resets_at, SEVEN_DAY_MS) } : w) as T;
+  // Only some accounts have a 5-hour window; absent or already reset reads as null, not 0%.
+  const f = openFiveHour(d.five_hour);
   return {
     ...snap,
     data: {
       ...d,
-      // Claude has no 5-hour limit any more; drop it from cached snapshots seeded before the change.
-      five_hour: undefined,
+      five_hour: f ? { ...f, ...pacing(f.utilization, f.resets_at, FIVE_HOUR_MS) } : null,
       seven_day: enrichSeven(d.seven_day ?? { utilization: 0, resets_at: null }),
       seven_day_sonnet: enrichSeven(d.seven_day_sonnet),
       seven_day_opus: enrichSeven(d.seven_day_opus),

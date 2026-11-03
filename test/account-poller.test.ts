@@ -84,3 +84,18 @@ test("a restart with recent seeded data waits for the normal cadence instead of 
   assert.equal(p.poller.snapshot().dataSource, "active");
   p.poller.stop();
 });
+
+test("a Claude 5-hour reset does not trigger an extra active check; Codex's still does", async () => {
+  const resetFar = T0 + 5 * 86_400_000;
+  const fiveSoon = T0 + 10 * 60_000;
+  const withFive = { ...week(10, resetFar), five_hour: { utilization: 50, resets_at: iso(fiveSoon) } };
+  const claude = make([withFive]);
+  await claude.poller.tick();
+  assert.equal(claude.next() - T0, 30 * 60_000);
+  claude.poller.stop();
+  const codex = make([{ seven_day: { used_percent: 10, resets_at: iso(resetFar) },
+    five_hour: { used_percent: 50, resets_at: iso(fiveSoon) }, additional: [] }], "codex");
+  await codex.poller.tick();
+  assert.equal(codex.next() - T0, 10 * 60_000 + 90_000);
+  codex.poller.stop();
+});

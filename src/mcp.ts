@@ -36,7 +36,7 @@ const consent = {
   allowLabel: () => "Authorize usage reading",
 };
 
-const INSTRUCTIONS = "Read-only view of ET's AI account usage from usage-api. Use list_accounts for the overview and suggest_account to pick which Claude or Codex account has room for more work. Claude accounts only have a weekly limit; Codex has weekly and 5-hour windows. Nothing here changes accounts.";
+const INSTRUCTIONS = "Read-only view of ET's AI account usage from usage-api. Use list_accounts for the overview and suggest_account to pick which Claude or Codex account has room for more work. Every account has a weekly limit; Codex and some Claude accounts also have a 5-hour window (five_hour is null where there is none). Nothing here changes accounts.";
 
 export interface McpOptions extends ToolContext {
   ownerKey?: string;

@@ -132,8 +132,8 @@ export class CliProxyClient {
       const headers = { "anthropic-beta": "oauth-2025-04-20",
         "User-Agent": `claude-cli/${process.env.CLAUDE_CLI_VERSION ?? "2.1.306"} (external, cli)` };
       const raw = await this.providerGet(account, "https://api.anthropic.com/api/oauth/usage?cedar_ember=1", headers);
-      // Only the weekly window matters (Claude has no 5-hour limit any more). It can be null while
-      // idle or right after a reset, which is 0% used; only a body without it at all is bad.
+      // The weekly window is required; it can be null while idle or right after a reset, which is
+      // 0% used. The 5-hour window is optional: only some accounts have one, and it is null while idle.
       if (!hasWeeklyWindow(raw)) throw new Error("Claude usage response is missing the weekly window");
       let profile = this.profiles.get(id);
       if (!profile || Date.now() - profile.at > PROFILE_TTL_MS) {

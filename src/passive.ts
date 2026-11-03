@@ -14,7 +14,9 @@ export interface PassiveObservation {
   signals: Record<string, string>;
 }
 
-export interface PassiveClaude { seven_day: { utilization: number; resets_at: string | null } }
+export interface PassiveClaudeWindow { utilization: number; resets_at: string | null }
+/** five_hour is null when the headers carry no 5h window (account has none, or headers omit it). */
+export interface PassiveClaude { five_hour: PassiveClaudeWindow | null; seven_day: PassiveClaudeWindow }
 
 export interface PassiveCodexWindow { used_percent: number; resets_at: string | null; window_minutes: number }
 export interface PassiveCodex {
@@ -49,14 +51,15 @@ const epochIso = (v: string | undefined) => {
 export function parsePassiveClaude(o: PassiveObservation): PassiveClaude | null {
   const s = o.signals;
   // Header utilization is a fraction (0.57); the usage API and clients use percent.
-  const fraction = num(s["anthropic-ratelimit-unified-7d-utilization"]);
-  if (fraction == null) return null;
-  return {
-    seven_day: {
+  const window = (slot: "5h" | "7d"): PassiveClaudeWindow | null => {
+    const fraction = num(s[`anthropic-ratelimit-unified-${slot}-utilization`]);
+    return fraction == null ? null : {
       utilization: Math.round(fraction * 10000) / 100,
-      resets_at: epochIso(s["anthropic-ratelimit-unified-7d-reset"]),
-    },
+      resets_at: epochIso(s[`anthropic-ratelimit-unified-${slot}-reset`]),
+    };
   };
+  const sevenDay = window("7d");
+  return sevenDay ? { five_hour: window("5h"), seven_day: sevenDay } : null;
 }
 
 export function parsePassiveCodex(o: PassiveObservation): PassiveCodex | null {
@@ -109,7 +112,10 @@ export function mergePassive(family: string, active: any, activeAt: string | nul
   if (family === "claude") {
     const p = parsePassiveClaude(observation);
     if (!p || rolled(p.seven_day.resets_at)) return null;
-    return { ...(active ?? {}), seven_day: atLeast(p.seven_day, active?.seven_day, "utilization") };
+    // Headers without a 5h window (e.g. once the weekly limit is hit) keep the active check's one.
+    // A 5h window that has since reset is dropped by enrichClaude, not re-checked upstream.
+    const fiveHour = p.five_hour ? atLeast(p.five_hour, active?.five_hour, "utilization") : active?.five_hour ?? null;
+    return { ...(active ?? {}), five_hour: fiveHour, seven_day: atLeast(p.seven_day, active?.seven_day, "utilization") };
   }
   if (family !== "codex") return null;
   const p = parsePassiveCodex(observation);
