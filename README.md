@@ -128,7 +128,9 @@ Existing primary/secondary environment mappings retain `claude`, `claude2`,
 Numbers are persisted in `usage-accounts.json` beside the history file, so
 account order changes do not mix usage history. Removed/disabled connections
 stop polling and disappear. Each snapshot includes `account.id`, `account.name`,
-and `account.family`; clients can use the ID to persist visibility preferences.
+`account.family`, and `account.priority` (CLIProxyAPI's routing priority, re-read
+every 30 s; `null` when unset or when accounts come from 9router); clients can use
+the ID to persist visibility preferences.
 The website supports all account cards and history series automatically.
 
 Each provider runs an independent `Poller`:

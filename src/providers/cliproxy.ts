@@ -9,12 +9,20 @@ export interface ProxyAccount {
   email: string | null;
   authIndex: string;
   accountId: string | null;
+  /** CPA's routing priority for this account; null when none is set. */
+  priority: number | null;
 }
 
 type AuthFile = {
   id?: string; name?: string; provider?: string; type?: string; email?: string;
-  auth_index?: string; disabled?: boolean; id_token?: unknown;
+  auth_index?: string; disabled?: boolean; id_token?: unknown; priority?: unknown;
 };
+
+// CPA omits priority when it was never set; a numeric string is accepted in case a build serializes it that way.
+function priorityOf(value: unknown): number | null {
+  const n = typeof value === "string" && value.trim() ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) ? n : null;
+}
 
 export interface ProxyAccountStatus {
   provider: string; email: string | null; enabled: boolean;
@@ -79,7 +87,8 @@ export class CliProxyClient {
       const legacy = Object.entries(this.aliases).find(([, match]) => match === identity || match === `${provider}:${email}`)?.[0];
       const id = legacy ?? `cpa:${identity}`;
       if (accounts.some(a => a.id === id)) continue;
-      accounts.push({ id, provider, email, name: email ?? file.name ?? id, authIndex: file.auth_index, accountId: workspace });
+      accounts.push({ id, provider, email, name: email ?? file.name ?? id, authIndex: file.auth_index, accountId: workspace,
+        priority: priorityOf(file.priority) });
     }
     this.accounts = accounts;
     this.proxyAccounts = statuses;

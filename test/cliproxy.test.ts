@@ -25,6 +25,13 @@ test("CPA discovery preserves migrated identities and ignores disabled/unrelated
   assert.equal(accounts[1].id, "cpa:claude:two@example.com");
 });
 
+test("CPA discovery carries each account's routing priority, null when unset", async () => {
+  const { client } = setup([{ files: [{ ...file("claude", "one@example.com"), priority: 10 },
+    { ...file("codex", "two@example.com"), priority: "5" }, file("claude", "three@example.com")] }]);
+  const accounts = await client.listAccounts();
+  assert.deepEqual(accounts.map(a => a.priority), [10, 5, null]);
+});
+
 test("CPA fetches actual Codex windows through token substitution without exporting OAuth secrets", async () => {
   const { client, calls } = setup([{ files: [file("codex", "one@example.com")] }, ok({ plan_type: "pro",
     rate_limit: { primary_window: { used_percent: 47, limit_window_seconds: 604800, reset_at: 1800000000 } },

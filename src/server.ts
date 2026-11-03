@@ -139,7 +139,7 @@ const ACCOUNTS_FILE = path.join(path.dirname(HISTORY_FILE), "usage-accounts.json
 let assignments: Record<string, string> = {};
 try { assignments = JSON.parse(await fs.readFile(ACCOUNTS_FILE, "utf8")); }
 catch (err: any) { if (err?.code !== "ENOENT") throw err; }
-const accountPollers = new Map<string, { connectionId: string; name: string; family: string; poller: Poller<unknown> }>();
+const accountPollers = new Map<string, { connectionId: string; name: string; family: string; priority: number | null; poller: Poller<unknown> }>();
 async function syncAccounts() {
   const connections = cliProxy ? await cliProxy.listAccounts() : listConnections();
   const next = assignAccounts(connections, assignments, {
@@ -154,14 +154,15 @@ async function syncAccounts() {
     const connection = connections.find(c => c.id === id);
     if (!connection || (key === "claude2" && CLAUDE2_OFF) || (key === "codex2" && CODEX2_OFF)) continue;
     active.add(key);
+    const priority = "priority" in connection ? connection.priority : null;
     const existing = accountPollers.get(key);
-    if (existing) { existing.name = connection.email ?? connection.name; continue; }
+    if (existing) { existing.name = connection.email ?? connection.name; existing.priority = priority; continue; }
     const family = connection.provider;
     const poller = new Poller<unknown>(key,
       () => cliProxy ? cliProxy.fetchUsage(id) : family === "claude" ? fetchClaudeUsage(id) : fetchCodexUsage(id), remember(key));
     const last = lastGood[key];
     if (last) poller.seed(last.data, last.fetchedAt);
-    accountPollers.set(key, { connectionId: id, name: connection.email ?? connection.name, family, poller });
+    accountPollers.set(key, { connectionId: id, name: connection.email ?? connection.name, family, priority, poller });
     poller.start();
   }
   for (const [key, account] of accountPollers) {
@@ -303,7 +304,7 @@ function currentProviders(): Record<string, any> {
     const snapshot = account.poller.snapshot();
     providers[key] = {
       ...snapshot, data: enrichProviderData(key, snapshot.data),
-      account: { id: account.connectionId, name: account.name, family: account.family },
+      account: { id: account.connectionId, name: account.name, family: account.family, priority: account.priority },
       renewal: renewals.get(key),
       source: cliProxy ? "cliproxyapi" : "9router",
     };
