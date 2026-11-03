@@ -353,9 +353,10 @@ function statusDot(snap) {
 function card(name, snap) {
   const family = /^(codex|claude)\d*$/.exec(name)?.[1];
   const renderer = RENDERERS[family ?? name] || renderRaw;
-  const stamp = snap?.fetchedAt
-    ? `fetched ${fmtRel(snap.fetchedAt)}${snap.intervalSec ? ` · every ${snap.intervalSec}s` : ""}`
-    : "no fetch yet";
+  // Accounts read CPA's request headers ("passive") and only check the usage endpoint as a slow backup.
+  const how = snap?.dataSource === "passive" ? "seen in traffic" : "fetched";
+  const every = snap?.intervalSec ? ` · ${snap.dataSource ? "backup check" : "every"} ${snap.intervalSec >= 120 ? `${Math.round(snap.intervalSec / 60)}m` : `${snap.intervalSec}s`}` : "";
+  const stamp = snap?.fetchedAt ? `${how} ${fmtRel(snap.fetchedAt)}${every}` : "no fetch yet";
   const body = (snap?.error
     ? `<div class="err">${escapeHtml(String(snap.error))}</div>${snap.data ? renderer(snap) : ""}`
     : renderer(snap || {})) + (family ? fmtRenewal(snap?.renewal) : "");

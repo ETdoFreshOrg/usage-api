@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { Poller } from "./cache.js";
+import { AccountPoller } from "./account-poller.js";
 import { HistoryGranularity, HistoryStore } from "./history.js";
 import { assignAccounts } from "./accounts.js";
 import { CliProxyClient } from "./providers/cliproxy.js";
@@ -74,24 +75,34 @@ function saveLast(provider: string, data: unknown, fetchedAt: Date) {
     .catch((err) => console.warn(`could not write ${LAST_FILE}: ${err?.message ?? err}`));
 }
 
+// Window lengths for pacing. Declared before the first account sync, which can record
+// passive history (and so enrich data) while this module is still initializing.
+const FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
+const SEVEN_DAY_MS = 7 * 24 * 60 * 60 * 1000;
+const THIRTY_DAY_MS = 30 * 24 * 60 * 60 * 1000;
+
 function remember<T>(provider: string): (data: T, fetchedAt: Date) => void {
   return (data: T, fetchedAt: Date) => {
     saveLast(provider, data, fetchedAt);
-    const enriched = enrichProviderData(provider, data);
-    if (!/^codex\d*$/.test(provider) || !enriched || typeof enriched !== "object") {
-      history.recordProvider(provider, enriched, fetchedAt);
-      return;
-    }
-    // Codex retains primary/secondary as compatibility aliases in /api/usage.
-    // Do not duplicate those same values in history alongside the canonical
-    // five_hour/seven_day series.
-    const { primary: _primary, secondary: _secondary, ...codexData } = enriched as any;
-    codexData.additional = (codexData.additional ?? []).map((a: any) => {
-      const { primary: _p, secondary: _s, ...rest } = a;
-      return rest;
-    });
-    history.recordProvider(provider, codexData, fetchedAt);
+    recordHistory(provider, data, fetchedAt);
   };
+}
+
+function recordHistory(provider: string, data: unknown, fetchedAt: Date) {
+  const enriched = enrichProviderData(provider, data);
+  if (!/^codex\d*$/.test(provider) || !enriched || typeof enriched !== "object") {
+    history.recordProvider(provider, enriched, fetchedAt);
+    return;
+  }
+  // Codex retains primary/secondary as compatibility aliases in /api/usage.
+  // Do not duplicate those same values in history alongside the canonical
+  // five_hour/seven_day series.
+  const { primary: _primary, secondary: _secondary, ...codexData } = enriched as any;
+  codexData.additional = (codexData.additional ?? []).map((a: any) => {
+    const { primary: _p, secondary: _s, ...rest } = a;
+    return rest;
+  });
+  history.recordProvider(provider, codexData, fetchedAt);
 }
 
 // Accept the workspace .env's existing names as fallbacks.
@@ -139,7 +150,7 @@ const ACCOUNTS_FILE = path.join(path.dirname(HISTORY_FILE), "usage-accounts.json
 let assignments: Record<string, string> = {};
 try { assignments = JSON.parse(await fs.readFile(ACCOUNTS_FILE, "utf8")); }
 catch (err: any) { if (err?.code !== "ENOENT") throw err; }
-const accountPollers = new Map<string, { connectionId: string; name: string; family: string; priority: number | null; poller: Poller<unknown> }>();
+const accountPollers = new Map<string, { connectionId: string; name: string; family: string; priority: number | null; poller: AccountPoller }>();
 async function syncAccounts() {
   const connections = cliProxy ? await cliProxy.listAccounts() : listConnections();
   const next = assignAccounts(connections, assignments, {
@@ -155,15 +166,25 @@ async function syncAccounts() {
     if (!connection || (key === "claude2" && CLAUDE2_OFF) || (key === "codex2" && CODEX2_OFF)) continue;
     active.add(key);
     const priority = "priority" in connection ? connection.priority : null;
+    const observation = "observation" in connection ? connection.observation : null;
     const existing = accountPollers.get(key);
-    if (existing) { existing.name = connection.email ?? connection.name; existing.priority = priority; continue; }
+    if (existing) {
+      existing.name = connection.email ?? connection.name;
+      existing.priority = priority;
+      existing.poller.observe(observation);
+      continue;
+    }
     const family = connection.provider;
-    const poller = new Poller<unknown>(key,
-      () => cliProxy ? cliProxy.fetchUsage(id) : family === "claude" ? fetchClaudeUsage(id) : fetchCodexUsage(id), remember(key));
+    // Passive CPA headers are the main source; this active check is the slow backup (see account-poller.ts).
+    const poller = new AccountPoller(key, family,
+      () => cliProxy ? cliProxy.fetchUsage(id) : family === "claude" ? fetchClaudeUsage(id) : fetchCodexUsage(id),
+      { onActive: remember(key), onPassive: (data, at) => recordHistory(key, data, at) });
     const last = lastGood[key];
     if (last) poller.seed(last.data, last.fetchedAt);
+    poller.observe(observation);
     accountPollers.set(key, { connectionId: id, name: connection.email ?? connection.name, family, priority, poller });
-    poller.start();
+    // Stagger first checks so a restart does not hit every account at once.
+    poller.start(5 * (accountPollers.size - 1));
   }
   for (const [key, account] of accountPollers) {
     if (!active.has(key)) { account.poller.stop(); accountPollers.delete(key); }
@@ -215,9 +236,6 @@ function pacing(usedPct: number, resetIso: string | null, windowMs: number) {
   return { expected_percent: expected, slack: expected - usedPct };
 }
 
-const FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
-const SEVEN_DAY_MS = 7 * 24 * 60 * 60 * 1000;
-const THIRTY_DAY_MS = 30 * 24 * 60 * 60 * 1000;
 
 function enrichClaude(snap: { data?: any }) {
   if (!snap.data) return snap;
