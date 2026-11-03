@@ -255,3 +255,17 @@ test("history graph renders separate per-series graphs", () => {
   assert.match(html, /function renderOneSeries/);
   assert.match(html, /selected\.map\(item => renderOneSeries/);
 });
+
+test("account cards show the manual renewal date", () => {
+  const fn = html.match(/function fmtRenewal\(r\) \{[\s\S]*?\n\}/);
+  const esc = html.match(/function escapeHtml\(s\) \{.*\}/);
+  assert.ok(fn && esc, "fmtRenewal should exist in public/index.html");
+  assert.match(html, /\(family \? fmtRenewal\(snap\?\.renewal\) : ""\)/);
+  const sandbox = { Date, Number, String };
+  vm.createContext(sandbox);
+  vm.runInContext(`${esc[0]} ${fn[0]}; globalThis.fmtRenewal = fmtRenewal;`, sandbox);
+  assert.equal(sandbox.fmtRenewal(null), "");
+  const out = sandbox.fmtRenewal({ renews_at: "2026-11-10", billing_cycle: "monthly", days_until_renewal: 7, source: "manual" });
+  assert.match(out, /renews in 7d \(.*2026.*\) · monthly/);
+  assert.match(sandbox.fmtRenewal({ renews_at: "2026-11-03", billing_cycle: "yearly", days_until_renewal: 0 }), /renews today/);
+});

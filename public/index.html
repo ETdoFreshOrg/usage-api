@@ -308,6 +308,14 @@ function renderRaw(snap) {
   if (!d) return `<div class="empty">no data yet</div>`;
   return `<details><summary>raw</summary><pre class="json">${escapeHtml(JSON.stringify(d, null, 2))}</pre></details>`;
 }
+function fmtRenewal(r) {
+  if (!r) return "";
+  const days = r.days_until_renewal;
+  const when = days === 0 ? "today" : days === 1 ? "tomorrow" : `in ${days}d`;
+  const [y, m, d] = r.renews_at.split("-").map(Number);
+  const date = new Date(y, m - 1, d).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  return `<div class="sub" title="Set manually; ${escapeHtml(r.billing_cycle)} billing">renews ${when} (${escapeHtml(date)}) · ${escapeHtml(r.billing_cycle)}</div>`;
+}
 function escapeHtml(s) { return String(s).replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 
 const PROVIDER_LINKS = {
@@ -348,9 +356,9 @@ function card(name, snap) {
   const stamp = snap?.fetchedAt
     ? `fetched ${fmtRel(snap.fetchedAt)}${snap.intervalSec ? ` · every ${snap.intervalSec}s` : ""}`
     : "no fetch yet";
-  const body = snap?.error
+  const body = (snap?.error
     ? `<div class="err">${escapeHtml(String(snap.error))}</div>${snap.data ? renderer(snap) : ""}`
-    : renderer(snap || {});
+    : renderer(snap || {})) + (family ? fmtRenewal(snap?.renewal) : "");
   const link = PROVIDER_LINKS[family ?? name];
   const number = family ? (name.slice(family.length) || "1") : "";
   const title = family ? `${family} #${number}` : (PROVIDER_TITLES[name] ?? name);

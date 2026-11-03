@@ -60,6 +60,39 @@ Codex usage exposes semantic `five_hour` and `seven_day` windows. Either may be
 `secondary` fields remain as compatibility aliases for `five_hour` and
 `seven_day`; they do not mirror OpenAI's variable raw slot positions.
 
+## Subscription renewal dates
+
+Each Claude/Codex account can carry a manually entered next billing date.
+`/api/usage` account entries, the dashboard cards, and the MCP's
+`list_accounts` / `get_usage` include:
+
+```json
+"renewal": { "renews_at": "2026-11-10", "billing_cycle": "monthly", "days_until_renewal": 7, "source": "manual" }
+```
+
+`renewal` is `null` when no date is set. Dates are calendar dates in
+`America/Chicago` (`RENEWAL_TIME_ZONE`). Once a stored date passes, output rolls
+it forward by whole monthly or yearly cycles. The stored anchor is left unchanged, so a
+31st renewal returns to the 31st after short months.
+
+Settings live in `usage-renewals.json` beside the history file
+(`/home/node/data` in Dokploy; override with `USAGE_RENEWALS_FILE`), keyed by
+account key. Hand edits are picked up on the next request. Set or update one
+with the MCP owner key:
+
+```bash
+curl -X PUT https://usage.etdofresh.com/api/renewals/codex \
+  -H "Authorization: Bearer $USAGE_MCP_OWNER_KEY" -H "Content-Type: application/json" \
+  -d '{"renews_at":"2026-12-10","billing_cycle":"monthly"}'
+curl -X DELETE https://usage.etdofresh.com/api/renewals/codex -H "Authorization: Bearer $USAGE_MCP_OWNER_KEY"
+curl https://usage.etdofresh.com/api/renewals      # public, read-only
+```
+
+Without `USAGE_MCP_OWNER_KEY`, edits return 503. On first start, the current
+dates for claude, claude3, claude4, codex, codex2 and codex3 are added only for
+keys absent from the file. A `DELETE` stores `null`, so seeding never
+restores a cleared date. The MCP stays read-only and cannot change these dates.
+
 ## MCP (read-only, owner-only)
 
 `https://usage.etdofresh.com/mcp` is a stateless Streamable HTTP MCP server for

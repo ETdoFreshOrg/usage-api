@@ -21,7 +21,8 @@ const providers: Record<string, any> = {
   claude4: { data: { seven_day: { utilization: 100, resets_at: hoursFromNow(5) } },
     fetchedAt: hoursFromNow(-0.05), ageSec: 180, staleness: "fresh", error: null, account: { id: "a4", name: "four@example.com", family: "claude" } },
   codex: { data: { plan_type: "pro", seven_day: { used_percent: 30, resets_at: hoursFromNow(24), window_minutes: 10080 }, five_hour: { used_percent: 100, resets_at: hoursFromNow(2), window_minutes: 300 }, additional: [] },
-    fetchedAt: hoursFromNow(-0.05), ageSec: 180, staleness: "fresh", error: null, account: { id: "c1", name: "codex@example.com", family: "codex" } },
+    fetchedAt: hoursFromNow(-0.05), ageSec: 180, staleness: "fresh", error: null, account: { id: "c1", name: "codex@example.com", family: "codex" },
+    renewal: { renews_at: "2026-11-10", billing_cycle: "monthly", days_until_renewal: 9, source: "manual" } },
   zai: { data: null, error: "ZAI_API_KEY not set" },
 };
 
@@ -134,6 +135,8 @@ test("signed-in client lists read-only tools and reads usage", async () => {
     assert.equal("five_hour" in claude, false);
     assert.deepEqual(claude.reset_credits, { available: 2, next_expires_at: hoursFromNow(72) });
     assert.equal(accounts.accounts[1].reset_credits, null);
+    assert.equal(claude.renewal, null);
+    assert.deepEqual(accounts.accounts[3].renewal, { renews_at: "2026-11-10", billing_cycle: "monthly", days_until_renewal: 9, source: "manual" });
     assert.deepEqual(claude.proxy, { enabled: true, status: "active", unavailable: false });
     assert.equal("proxy" in accounts.accounts[1], false);
     assert.deepEqual(accounts.paused_on_proxy, [{ provider: "claude", email: "paused@example.com" }]);
@@ -151,6 +154,7 @@ test("signed-in client lists read-only tools and reads usage", async () => {
     const detail = (await call(s.base, tokens.access_token, "get_usage", { account: "codex" })).structuredContent;
     assert.equal(detail.five_hour.used_percent, 100);
     assert.equal(detail.plan, "pro");
+    assert.equal(detail.renewal.renews_at, "2026-11-10");
     assert.equal((await call(s.base, tokens.access_token, "get_usage", { account: "nope" })).isError, true);
 
     const hist = (await call(s.base, tokens.access_token, "usage_history", { account: "claude", days: 7 })).structuredContent;

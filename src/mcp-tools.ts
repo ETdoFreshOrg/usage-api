@@ -15,6 +15,7 @@ export interface ProviderSnapshot {
   error?: string | null;
   nextFetchAt?: string;
   account?: { id: string; name: string; family: string };
+  renewal?: { renews_at: string; billing_cycle: string; days_until_renewal: number; source: "manual" } | null;
 }
 
 export interface ToolContext {
@@ -31,7 +32,7 @@ const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: 
 export const tools = [
   {
     name: "list_accounts",
-    description: "Every Claude and Codex account usage-api is tracking, with weekly usage %, when the week resets, how far ahead or behind an even pace it is, Codex's 5-hour window, how many reset credits each account has (count only; nothing here uses one), whether the numbers are fresh, and the account's status on the CLIProxyAPI proxy. Also lists accounts that are paused (disabled) on the proxy, and which other providers (Z.ai, OpenRouter, OpenAI, Jev) have data. Read-only.",
+    description: "Every Claude and Codex account usage-api is tracking, with weekly usage %, when the week resets, how far ahead or behind an even pace it is, Codex's 5-hour window, how many reset credits each account has (count only; nothing here uses one), the next subscription renewal date (set manually on usage-api; null if unknown), whether the numbers are fresh, and the account's status on the CLIProxyAPI proxy. Also lists accounts that are paused (disabled) on the proxy, and which other providers (Z.ai, OpenRouter, OpenAI, Jev) have data. Read-only.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
       provider: { type: "string", enum: ["claude", "codex"], description: "Only this provider's accounts. Omit for both." },
     } },
@@ -39,7 +40,7 @@ export const tools = [
   },
   {
     name: "get_usage",
-    description: "Full usage detail for one account or provider key from list_accounts (e.g. claude, claude3, codex, codex2, zai, openrouter, openai, jev): per-model weekly windows, reset credits, Codex additional limits, plan, poll status. Read-only.",
+    description: "Full usage detail for one account or provider key from list_accounts (e.g. claude, claude3, codex, codex2, zai, openrouter, openai, jev): per-model weekly windows, reset credits, subscription renewal date, Codex additional limits, plan, poll status. Read-only.",
     inputSchema: { type: "object", additionalProperties: false, required: ["account"], properties: {
       account: { type: "string", description: "Account key from list_accounts, such as claude3 or codex." },
     } },
@@ -129,6 +130,8 @@ export function summarizeAccount(key: string, p: ProviderSnapshot, now = Date.no
       available: num(d.reset_credits.available_count) ?? 0,
       next_expires_at: d.reset_credits.next_expires_at ?? null,
     } : null,
+    // Next subscription billing date, set by hand on usage-api; null if unset.
+    renewal: p.renewal ?? null,
     status: status(p),
   };
 }
@@ -195,7 +198,7 @@ export async function callTool(name: string, rawArgs: unknown, ctx: ToolContext)
         accounts: accounts(ctx, provider),
         paused_on_proxy: paused === null ? null : paused.filter(a => !provider || a.provider === provider),
         other_providers: provider ? [] : others,
-        notes: "reset_credits.available is a read-only count; no tool can use a reset. Claude has only a weekly limit. Codex has weekly and 5-hour windows. pace_slack > 0 means under an even pace for the week. paused_on_proxy is null when the proxy list is unavailable.",
+        notes: "reset_credits.available is a read-only count; no tool can use a reset. Claude has only a weekly limit. Codex has weekly and 5-hour windows. pace_slack > 0 means under an even pace for the week. renewal is the next subscription billing date (America/Chicago calendar date) entered by hand, or null if unset. paused_on_proxy is null when the proxy list is unavailable.",
       });
     }
     if (name === "get_usage") {
