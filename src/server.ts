@@ -8,6 +8,7 @@ import { assignAccounts } from "./accounts.js";
 import { CliProxyClient } from "./providers/cliproxy.js";
 import { RecentRequests, AccountActivityReader } from "./recent.js";
 import { installMcp } from "./mcp.js";
+import { RenewalStore, SEED_RENEWALS, installRenewals } from "./renewals.js";
 import { OAuthStore } from "../oauth/oauth-store.mjs";
 
 // Load env from the shared volume (same .env that ai-sessions uses) so secrets
@@ -128,6 +129,11 @@ if (!cliProxy) try {
 } catch (err: any) {
   console.warn(`could not read 9router's connection store at startup: ${err?.message ?? err}`);
 }
+
+// Manually set renewal dates, keyed like the account numbers below.
+const RENEWALS_FILE = process.env.USAGE_RENEWALS_FILE ?? path.join(path.dirname(HISTORY_FILE), "usage-renewals.json");
+const renewals = new RenewalStore(RENEWALS_FILE, process.env.RENEWAL_TIME_ZONE?.trim() || undefined);
+await renewals.load(SEED_RENEWALS);
 
 const ACCOUNTS_FILE = path.join(path.dirname(HISTORY_FILE), "usage-accounts.json");
 let assignments: Record<string, string> = {};
@@ -298,6 +304,7 @@ function currentProviders(): Record<string, any> {
     providers[key] = {
       ...snapshot, data: enrichProviderData(key, snapshot.data),
       account: { id: account.connectionId, name: account.name, family: account.family },
+      renewal: renewals.get(key),
       source: cliProxy ? "cliproxyapi" : "9router",
     };
   }
@@ -323,11 +330,14 @@ app.get("/api/history", (req, res) => {
   res.json(history.toSeries(granularity));
 });
 
+const OWNER_KEY = process.env.USAGE_MCP_OWNER_KEY?.trim() || undefined;
+installRenewals(app, renewals, OWNER_KEY);
+
 // Read-only MCP at /mcp (owner-key OAuth). Off unless USAGE_MCP_OWNER_KEY is set.
 const mcpEnabled = installMcp(app, {
-  ownerKey: process.env.USAGE_MCP_OWNER_KEY?.trim() || undefined,
+  ownerKey: OWNER_KEY,
   publicOrigin: process.env.USAGE_MCP_PUBLIC_ORIGIN?.trim() || "https://usage.etdofresh.com",
-  store: process.env.USAGE_MCP_OWNER_KEY?.trim()
+  store: OWNER_KEY
     ? new OAuthStore(process.env.USAGE_MCP_OAUTH_DB ?? path.join(path.dirname(HISTORY_FILE), "mcp-oauth.db"))
     : undefined,
   getProviders: currentProviders,
