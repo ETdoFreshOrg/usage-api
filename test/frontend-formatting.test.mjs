@@ -314,3 +314,63 @@ test("account cards show the manual renewal date", () => {
 test("Claude card shows a 5-hour row only when the account reports one", () => {
   assert.match(html, /\$\{sub\("5-hour", d\.five_hour\)\}/);
 });
+
+function loadAccountStatusHelpers(nowIso = "2026-01-01T00:00:00.000Z") {
+  const block = html.match(/\/\/ --- account status helpers[\s\S]*?\/\/ --- end account status helpers ---/);
+  assert.ok(block, "account status helpers should exist in public/index.html");
+  const fmtTime = html.match(/function fmtTime\(iso\) \{[\s\S]*?\n\}/)[0];
+  const sandbox = {
+    Date: class extends Date { static now() { return new Date(nowIso).getTime(); } },
+    Number, Math, String, Infinity,
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(`${fmtTime}\n${block[0]}\nglobalThis.h = { availability, fmtAvailability, sortProviderKeys, fmtPriority, accountEmail, dataAgeTooltip };`, sandbox);
+  return sandbox.h;
+}
+
+test("availability: per-model windows don't block, latest reset among full account-wide windows wins", () => {
+  const h = loadAccountStatusHelpers();
+  const claude = { data: { five_hour: null, seven_day: { utilization: 40, resets_at: "2026-01-05T00:00:00Z" },
+    seven_day_fable: { utilization: 100, resets_at: "2026-01-03T00:00:00Z" } } };
+  assert.equal(h.availability("claude3", claude).blocked, false);
+  const codex = { data: {
+    five_hour: { used_percent: 100, resets_at: "2026-01-01T02:00:00Z" },
+    one_day: null,
+    seven_day: { used_percent: 99.6, resets_at: "2026-01-03T05:00:00Z" },
+    additional: [{ five_hour: { used_percent: 100 } }] } };
+  const a = h.availability("codex", codex);
+  assert.equal(a.blocked, true);
+  assert.equal(a.availableAt, "2026-01-03T05:00:00.000Z");
+  assert.equal(h.fmtAvailability(a.blocked, a.availableAt), "2d 5h");
+  assert.equal(h.fmtAvailability(true, "2026-01-01T04:58:30Z"), "4h 58m");
+  assert.equal(h.fmtAvailability(true, "2026-01-01T00:00:20Z"), "<1m");
+  assert.equal(h.fmtAvailability(true, "2025-12-31T23:00:00Z"), "live");
+  assert.equal(h.fmtAvailability(true, null), "out");
+  assert.equal(h.fmtAvailability(false, null), "live");
+  const unknown = h.availability("claude", { data: { five_hour: { utilization: 100, resets_at: null }, seven_day: { utilization: 10 } } });
+  assert.equal(unknown.blocked, true);
+  assert.equal(unknown.availableAt, null);
+});
+
+test("cards group Codex, Claude, then others; priority highest first, unset last", () => {
+  const h = loadAccountStatusHelpers();
+  const p = (priority, name) => ({ account: { priority, name } });
+  const providers = {
+    claude: p(null, "a@x.com"), claude3: p(5, "b@x.com"), claude4: p(10, "c@x.com"),
+    codex: p(1, "d@x.com"), codex2: p(null, "e@x.com"), codex3: p(3, "f@x.com"),
+    zai: {}, jev: {}, openrouter: {}, openai: {},
+  };
+  const keys = ["claude", "claude3", "claude4", "codex", "codex2", "codex3", "zai", "jev", "openrouter", "openai"];
+  assert.deepEqual([...h.sortProviderKeys(keys, providers)],
+    ["codex3", "codex", "codex2", "claude4", "claude3", "claude", "zai", "jev", "openrouter", "openai"]);
+  assert.equal(h.fmtPriority(10), "P10");
+  assert.equal(h.fmtPriority(null), null);
+  assert.equal(h.accountEmail("claude3", { account: { name: "claude3" } }), null);
+});
+
+test("data age tooltip names the passive/active source", () => {
+  const h = loadAccountStatusHelpers();
+  const tip = h.dataAgeTooltip({ fetchedAt: "2025-12-31T23:50:00Z", dataSource: "passive", staleness: "fresh", observedAt: "2025-12-31T23:50:00Z" });
+  assert.match(tip, /^Data 10m ago: seen in CPA request headers \(passive\)/);
+  assert.match(tip, /Last seen in traffic/);
+});
