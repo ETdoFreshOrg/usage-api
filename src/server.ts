@@ -36,6 +36,7 @@ try {
 }
 import { fetchClaudeUsage, openFiveHour } from "./providers/anthropic.js";
 import { fetchCodexUsage } from "./providers/codex.js";
+import { CodexWindow, reclassifyCodexWindows } from "./codex-windows.js";
 import { listConnections } from "./providers/ninerouter.js";
 import { fetchZaiUsage } from "./providers/zai.js";
 import { fetchOpenRouterUsage } from "./providers/openrouter.js";
@@ -261,32 +262,35 @@ function enrichClaude(snap: { data?: any }) {
 function enrichCodex(snap: { data?: any }) {
   if (!snap.data) return snap;
   const d = snap.data;
-  const enrichWin = (w: { used_percent: number; resets_at: string | null; window_minutes: number } | null, fallbackMin: number) => {
+  const enrichWin = (w: CodexWindow | null, fallbackMin: number) => {
     if (!w) return null;
     const ms = (w.window_minutes || fallbackMin) * 60 * 1000;
     return { ...w, ...pacing(w.used_percent, w.resets_at, ms) };
   };
-  const fiveHour = enrichWin(d.five_hour, 300);
-  const sevenDay = enrichWin(d.seven_day, 10080);
+  // Filed by length, so results saved before the 24-hour slot existed (a 1440-minute window
+  // under five_hour) read correctly without another upstream check.
+  const enrichAll = (raw: any) => {
+    const w = reclassifyCodexWindows(raw);
+    return { five_hour: enrichWin(w.five_hour, 300), one_day: enrichWin(w.one_day, 1440), seven_day: enrichWin(w.seven_day, 10080) };
+  };
+  const windows = enrichAll(d);
   return {
     ...snap,
     data: {
       ...d,
-      five_hour: fiveHour,
-      seven_day: sevenDay,
+      ...windows,
       // Preserve the old API fields, but keep their historical semantic
       // meanings rather than mirroring OpenAI's now-variable raw slots.
-      primary: fiveHour,
-      secondary: sevenDay,
-      additional: d.additional.map((a: any) => {
-        const additionalFiveHour = enrichWin(a.five_hour, 300);
-        const additionalSevenDay = enrichWin(a.seven_day, 10080);
+      // The 24-hour window has no legacy alias; it is only in one_day.
+      primary: windows.five_hour,
+      secondary: windows.seven_day,
+      additional: (d.additional ?? []).map((a: any) => {
+        const additional = enrichAll(a);
         return {
           ...a,
-          five_hour: additionalFiveHour,
-          seven_day: additionalSevenDay,
-          primary: additionalFiveHour,
-          secondary: additionalSevenDay,
+          ...additional,
+          primary: additional.five_hour,
+          secondary: additional.seven_day,
         };
       }),
     },

@@ -61,10 +61,17 @@ Returns per-provider:
   `observedAt` (latest CPA header observation) and `activeFetchedAt` (latest
   successful usage-endpoint check); see below.
 
-Codex usage exposes semantic `five_hour` and `seven_day` windows. Either may be
-`null` when OpenAI is not reporting that limit. The deprecated `primary` and
-`secondary` fields remain as compatibility aliases for `five_hour` and
-`seven_day`; they do not mirror OpenAI's variable raw slot positions.
+Codex usage exposes semantic `five_hour`, `one_day` and `seven_day` windows,
+each filed by its length (`window_minutes`), never by OpenAI's raw slot: up to
+12 h is `five_hour`, up to 3 days `one_day`, longer `seven_day`. Any of them may
+be `null` when OpenAI is not reporting that limit. Since 2026-11-03 the promax
+account (etdofresh@gmail.com) reports only a 24-hour window, so it has
+`one_day` and no `seven_day`. Each window carries pacing (`expected_percent` /
+`slack`) over its own length. The deprecated `primary` and `secondary` fields
+remain as compatibility aliases for `five_hour` and `seven_day`; they do not
+mirror OpenAI's variable raw slot positions, and the 24-hour window is only in
+`one_day`. Results saved before `one_day` existed are re-filed by length when
+served, so no extra upstream check is needed.
 
 Claude usage also has `five_hour` (`utilization`, `resets_at`, plus pacing
 `expected_percent` / `slack` over a 5-hour window). Only some Claude accounts
@@ -113,10 +120,10 @@ credits or change CLIProxyAPI.
 
 | Tool | What it returns |
 | --- | --- |
-| `list_accounts(provider?)` | Each Claude/Codex account: weekly %, reset time, pace, 5-hour window (Codex, and Claude accounts that have one; `null` otherwise), reset-credit count (read-only), freshness, proxy status; accounts paused on the proxy; other providers with data |
+| `list_accounts(provider?)` | Each Claude/Codex account: weekly %, reset time, pace (`weekly` is `null` for an account with no weekly limit), 5-hour window (Codex, and Claude accounts that have one; `null` otherwise), 24-hour window (`one_day`, Codex only; `null` where there is none), reset-credit count (read-only), freshness, proxy status; accounts paused on the proxy; other providers with data |
 | `get_usage(account)` | Full detail for one key (`claude3`, `codex`, `zai`, ...) |
-| `suggest_account(provider?)` | Accounts ranked by room for more work (blocked last) |
-| `usage_history(account, days?, granularity?)` | Weekly (and 5-hour, where the account has one) % over time |
+| `suggest_account(provider?)` | Accounts ranked by room for more work (blocked last); an account with no weekly limit is ranked by its 24-hour window (`ranked_by`) |
+| `usage_history(account, days?, granularity?)` | Weekly (and 5-hour / 24-hour, where the account has them) % over time |
 | `recent_requests(hours?)` | Per-account request/error/token counts from CPA Manager, plus the latest 20 requests |
 
 Sign-in uses the single-owner OAuth module shared with imessage-mcp and
@@ -153,8 +160,8 @@ which usage-api already reads every 30 s for account discovery. Anthropic's
 headers carry the account's current weekly (and 5-hour) usage, so these
 numbers are used whenever they are newer than the last active check
 (`dataSource: "passive"`). Codex windows are classified by
-`window-minutes`, not header slot (promax reports its weekly window as
-`primary`). Claude headers for an account with no 5-hour limit (or that
+`window-minutes`, not header slot (promax has reported both its weekly and,
+since 2026-11-03, a 24-hour window as `primary`). Claude headers for an account with no 5-hour limit (or that
 has hit its weekly limit) carry no `5h` fields; the last active check's
 `five_hour` is kept then. Headers round down, so within the same window the higher of the
 passive and last active value is shown.

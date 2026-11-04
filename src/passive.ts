@@ -8,6 +8,8 @@
  * label for Claude) still comes from the slower active check.
  */
 
+import { classifyCodexWindows } from "./codex-windows.js";
+
 export interface PassiveObservation {
   /** ISO time of the request whose headers produced these signals. */
   observedAt: string;
@@ -22,6 +24,7 @@ export interface PassiveCodexWindow { used_percent: number; resets_at: string | 
 export interface PassiveCodex {
   plan_type: string | null;
   five_hour: PassiveCodexWindow | null;
+  one_day: PassiveCodexWindow | null;
   seven_day: PassiveCodexWindow | null;
   credits_balance: string | null;
 }
@@ -68,7 +71,7 @@ export function parsePassiveCodex(o: PassiveObservation): PassiveCodex | null {
   for (const slot of ["primary", "secondary"]) {
     const used = num(s[`x-codex-${slot}-used-percent`]);
     const minutes = num(s[`x-codex-${slot}-window-minutes`]);
-    // An unused slot is reported as 0% over a 0-minute window (promax has no 5-hour limit).
+    // An unused slot is reported as 0% over a 0-minute window (promax reports one window only).
     if (used == null || minutes == null || minutes <= 0) continue;
     let resets = epochIso(s[`x-codex-${slot}-reset-at`]);
     const after = num(s[`x-codex-${slot}-reset-after-seconds`]);
@@ -79,10 +82,9 @@ export function parsePassiveCodex(o: PassiveObservation): PassiveCodex | null {
   const unlimited = (s["x-codex-credits-unlimited"] ?? "").toLowerCase() === "true";
   return {
     plan_type: s["x-codex-plan-type"] || null,
-    // Classified by window length, not header slot: promax reports its weekly window as "primary".
-    // Same thresholds as classifyWindows in providers/codex.ts.
-    five_hour: windows.find(w => w.window_minutes <= 24 * 60) ?? null,
-    seven_day: windows.find(w => w.window_minutes > 24 * 60) ?? null,
+    // Classified by window length, not header slot: promax has reported both its weekly and,
+    // since 2026-11-03, a 24-hour window as "primary". Same cut-offs as the active check.
+    ...classifyCodexWindows(windows),
     credits_balance: unlimited ? "unlimited" : s["x-codex-credits-balance"] || null,
   };
 }
@@ -119,13 +121,15 @@ export function mergePassive(family: string, active: any, activeAt: string | nul
   }
   if (family !== "codex") return null;
   const p = parsePassiveCodex(observation);
-  if (!p || rolled(p.five_hour?.resets_at, p.seven_day?.resets_at)) return null;
+  if (!p || rolled(p.five_hour?.resets_at, p.one_day?.resets_at, p.seven_day?.resets_at)) return null;
   const fiveHour = p.five_hour && atLeast(p.five_hour, active?.five_hour, "used_percent");
+  const oneDay = p.one_day && atLeast(p.one_day, active?.one_day, "used_percent");
   const sevenDay = p.seven_day && atLeast(p.seven_day, active?.seven_day, "used_percent");
   return {
     ...(active ?? {}),
     plan_type: p.plan_type ?? active?.plan_type ?? null,
     five_hour: fiveHour,
+    one_day: oneDay,
     seven_day: sevenDay,
     primary: fiveHour,
     secondary: sevenDay,

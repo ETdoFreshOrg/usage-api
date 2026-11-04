@@ -65,10 +65,12 @@ test("history graph exposes all known provider series with preferred color famil
     { key: "claude:seven_day_design", label: "Claude Design 7-day", color: "#fed7aa", default: false },
     { key: "claude:seven_day_fable", label: "Claude Fable 7-day", color: "#c2410c", default: true },
     { key: "codex:five_hour", label: "Codex 5-hour", color: "#22c55e", default: false },
+    { key: "codex:one_day", label: "Codex 24-hour", color: "#4ade80", default: true },
     { key: "codex:seven_day", label: "Codex 7-day", color: "#86efac", default: true },
     { key: "codex:GPT-5.3-Codex-Spark five_hour", label: "Codex Spark 5-hour", color: "#06b6d4", default: false },
     { key: "codex:GPT-5.3-Codex-Spark seven_day", label: "Codex Spark 7-day", color: "#67e8f9", default: false },
     { key: "codex2:five_hour", label: "Codex #2 5-hour", color: "#3b82f6", default: false },
+    { key: "codex2:one_day", label: "Codex #2 24-hour", color: "#60a5fa", default: false },
     { key: "codex2:seven_day", label: "Codex #2 7-day", color: "#93c5fd", default: false },
     { key: "codex2:GPT-5.3-Codex-Spark five_hour", label: "Codex #2 Spark 5-hour", color: "#8b5cf6", default: false },
     { key: "codex2:GPT-5.3-Codex-Spark seven_day", label: "Codex #2 Spark 7-day", color: "#c4b5fd", default: false },
@@ -213,6 +215,43 @@ test("Codex card omits unavailable 5-hour metrics and explains the reporting gap
   assert.match(html, /windowRow\("7-day", d\.seven_day\)/);
   assert.match(html, /5-hour limit is not currently reported by Codex/);
   assert.doesNotMatch(html, /metricRow\("primary", d\.primary/);
+});
+
+function loadRenderCodex() {
+  const names = ["fmtPct", "fmtTime", "fmtRel", "barClass", "bar", "metricRow", "renderResetCredits", "renderCodex"];
+  const src = names.map((name) => {
+    const fn = html.match(new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`));
+    assert.ok(fn, `${name} should exist in public/index.html`);
+    return fn[0];
+  }).join("\n");
+  const esc = html.match(/function escapeHtml\(s\) \{.*\}/)[0];
+  const sandbox = { Date, Number, Math, String, isNaN };
+  vm.createContext(sandbox);
+  vm.runInContext(`${esc}\n${src}; globalThis.renderCodex = renderCodex;`, sandbox);
+  return sandbox.renderCodex;
+}
+
+test("Codex card shows a 24-hour window as its own row, never as the 5-hour one", () => {
+  const renderCodex = loadRenderCodex();
+  const resets = new Date(Date.now() + 12 * 3600_000).toISOString();
+  const dayOnly = renderCodex({ data: { five_hour: null, seven_day: null, additional: [],
+    one_day: { used_percent: 12, expected_percent: 50, resets_at: resets, window_minutes: 1440 } } });
+  assert.match(dayOnly, /<div class="label">24-hour<\/div>/);
+  assert.match(dayOnly, /12\.0%/);
+  assert.doesNotMatch(dayOnly, /<div class="label">5-hour<\/div>/);
+  assert.doesNotMatch(dayOnly, /5-hour limit is not currently reported/);
+  assert.match(dayOnly, /no 7-day limit is currently reported by Codex/);
+
+  const normal = renderCodex({ data: { additional: [], one_day: null,
+    five_hour: { used_percent: 5, resets_at: resets }, seven_day: { used_percent: 40, resets_at: resets } } });
+  assert.match(normal, /<div class="label">5-hour<\/div>/);
+  assert.match(normal, /<div class="label">7-day<\/div>/);
+  assert.doesNotMatch(normal, /24-hour/);
+  assert.doesNotMatch(normal, /not currently reported/);
+
+  const weeklyOnly = renderCodex({ data: { additional: [], five_hour: null, one_day: null, seven_day: { used_percent: 40, resets_at: resets } } });
+  assert.match(weeklyOnly, /5-hour limit is not currently reported by Codex/);
+  assert.doesNotMatch(weeklyOnly, /no 7-day limit/);
 });
 
 test("optional second Codex account remains separate and clearly labeled", () => {

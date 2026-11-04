@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
 import express from "express";
 import { installMcp, CLAUDE_CLIENT_ID, ETBOT_CLIENT, OAUTH_PATH } from "../src/mcp.js";
-import { suggest, summarizeAccount, type ToolContext } from "../src/mcp-tools.js";
+import { callTool, suggest, summarizeAccount, type ToolContext } from "../src/mcp-tools.js";
 
 const origin = "https://usage.etdofresh.com";
 const ownerKey = "usage-owner-fixture-key";
@@ -181,4 +181,44 @@ test("suggest puts stale and empty accounts after usable ones", () => {
   assert.equal(ranked[0].account, "claude2");
   assert.equal(ranked[0].spare_percent_per_day, 24);
   assert.equal(ranked[1].blocked_reason, "no usage data yet");
+});
+
+// etdofresh@gmail.com (promax) since 2026-11-03: a 24-hour window and no weekly limit.
+const dayOnlyCodex = (used: number) => ({ data: { plan_type: "promax", five_hour: null, seven_day: null,
+  one_day: { used_percent: used, resets_at: hoursFromNow(12), window_minutes: 1440, expected_percent: 50, slack: 50 - used }, additional: [] },
+  staleness: "fresh", account: { id: "c1", name: "etdofresh@gmail.com", family: "codex" } });
+
+test("a Codex account with only a 24-hour window is listed with it and ranked by it", () => {
+  const summary = summarizeAccount("codex", dayOnlyCodex(20), NOW);
+  assert.equal(summary.weekly, null);
+  assert.equal(summary.five_hour, null);
+  assert.deepEqual(summary.one_day, { used_percent: 20, remaining_percent: 80, resets_at: hoursFromNow(12), hours_until_reset: 12, expected_percent: 50, pace_slack: 30 });
+  assert.equal("one_day" in summarizeAccount("claude", providers.claude, NOW), false, "Claude accounts have no one_day field");
+
+  const weekly = summarizeAccount("codex2", { data: { seven_day: { used_percent: 50, resets_at: hoursFromNow(48) }, five_hour: null },
+    staleness: "fresh", account: { id: "c2", name: "two@example.com", family: "codex" } }, NOW);
+  const ranked = suggest([weekly, summary]);
+  assert.deepEqual(ranked.map(r => r.account), ["codex", "codex2"]);
+  assert.equal(ranked[0].usable_now, true);
+  assert.equal(ranked[0].ranked_by, "one_day");
+  assert.equal(ranked[0].weekly_remaining_percent, null);
+  assert.equal(ranked[0].one_day_remaining_percent, 80);
+  assert.equal(ranked[0].one_day_resets_at, hoursFromNow(12));
+  assert.equal(ranked[0].spare_percent_per_day, 160);
+  assert.equal(ranked[1].ranked_by, "weekly");
+  assert.equal("headroom" in ranked[0], false);
+
+  const full = suggest([summarizeAccount("codex", dayOnlyCodex(100), NOW)])[0];
+  assert.equal(full.usable_now, false);
+  assert.equal(full.blocked_reason, "24-hour limit reached");
+});
+
+test("usage_history includes the 24-hour series", async () => {
+  const hist = await callTool("usage_history", { account: "codex", days: 2 }, { ...ctx, getHistory: (granularity) => ({
+    granularity, generatedAt: new Date(NOW).toISOString(), retentionDays: null, series: [
+      { provider: "codex", metric: "one_day", points: [{ t: hoursFromNow(-1), value: 7, expectedValue: 10, min: 7, max: 7, count: 1 }] },
+      { provider: "codex", metric: "five_hour", points: [{ t: hoursFromNow(-50), value: 4, min: 4, max: 4, count: 1 }] }] }) });
+  assert.deepEqual((hist.structuredContent as any).series, [
+    { metric: "one_day", points: [{ t: hoursFromNow(-1), used_percent: 7, expected_percent: 10 }] },
+    { metric: "five_hour", points: [] }]);
 });
