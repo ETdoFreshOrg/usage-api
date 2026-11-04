@@ -183,7 +183,7 @@ test("suggest puts stale and empty accounts after usable ones", () => {
   assert.equal(ranked[1].blocked_reason, "no usage data yet");
 });
 
-// etdofresh@gmail.com (promax) since 2026-11-03: a 24-hour window and no weekly limit.
+// A Codex account reporting only a 24-hour window and no weekly limit.
 const dayOnlyCodex = (used: number) => ({ data: { plan_type: "promax", five_hour: null, seven_day: null,
   one_day: { used_percent: used, resets_at: hoursFromNow(12), window_minutes: 1440, expected_percent: 50, slack: 50 - used }, additional: [] },
   staleness: "fresh", account: { id: "c1", name: "etdofresh@gmail.com", family: "codex" } });

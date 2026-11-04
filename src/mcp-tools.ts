@@ -32,7 +32,7 @@ const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: 
 export const tools = [
   {
     name: "list_accounts",
-    description: "Every Claude and Codex account usage-api is tracking, with weekly usage %, when the week resets, how far ahead or behind an even pace it is, the 5-hour window (Codex, and Claude accounts that have one; null otherwise), the 24-hour window (one_day, Codex accounts that have one; null otherwise; an account can have it instead of a weekly limit), how many reset credits each account has (count only; nothing here uses one), the next subscription renewal date (set manually on usage-api; null if unknown), whether the numbers are fresh, and the account's status on the CLIProxyAPI proxy. Also lists accounts that are paused (disabled) on the proxy, and which other providers (Z.ai, OpenRouter, OpenAI, Jev) have data. Read-only.",
+    description: "Every Claude and Codex account usage-api is tracking, with weekly usage %, when the week resets, how far ahead or behind an even pace it is, the 5-hour window (Codex, and Claude accounts that have one; null otherwise), the 24-hour window (one_day, Codex accounts that report one; usually null), how many reset credits each account has (count only; nothing here uses one), the next subscription renewal date (set manually on usage-api; null if unknown), whether the numbers are fresh, and the account's status on the CLIProxyAPI proxy. Also lists accounts that are paused (disabled) on the proxy, and which other providers (Z.ai, OpenRouter, OpenAI, Jev) have data. Read-only.",
     inputSchema: { type: "object", additionalProperties: false, properties: {
       provider: { type: "string", enum: ["claude", "codex"], description: "Only this provider's accounts. Omit for both." },
     } },
@@ -210,7 +210,7 @@ export async function callTool(name: string, rawArgs: unknown, ctx: ToolContext)
         accounts: accounts(ctx, provider),
         paused_on_proxy: paused === null ? null : paused.filter(a => !provider || a.provider === provider),
         other_providers: provider ? [] : others,
-        notes: "reset_credits.available is a read-only count; no tool can use a reset. Codex and some Claude accounts have a 5-hour window as well as the weekly one; five_hour is null for accounts without one (or with no open session). Some Codex accounts report a 24-hour window (one_day) instead of, or as well as, the others; weekly is null for an account with no weekly limit. pace_slack > 0 means under an even pace for that window. renewal is the next subscription billing date (America/Chicago calendar date) entered by hand, or null if unset. paused_on_proxy is null when the proxy list is unavailable.",
+        notes: "reset_credits.available is a read-only count; no tool can use a reset. Codex and some Claude accounts have a 5-hour window as well as the weekly one; five_hour is null for accounts without one (or with no open session). Codex accounts can also report a 24-hour window (one_day; usually null); weekly is null if an account reports no weekly limit. pace_slack > 0 means under an even pace for that window. renewal is the next subscription billing date (America/Chicago calendar date) entered by hand, or null if unset. paused_on_proxy is null when the proxy list is unavailable.",
       });
     }
     if (name === "get_usage") {

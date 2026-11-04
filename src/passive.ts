@@ -65,13 +65,38 @@ export function parsePassiveClaude(o: PassiveObservation): PassiveClaude | null 
   return sevenDay ? { five_hour: window("5h"), seven_day: sevenDay } : null;
 }
 
+// OpenAI names the limit a request counted against in x-codex-active-limit. "premium" is the
+// account's Codex limit; other values are feature limits with their own windows (an image
+// request reports "imagegen_premium" and a 24-hour image quota). Their headers say nothing
+// about the account's Codex limit, so they are not read as it. A missing header is taken as the
+// Codex limit, as before the header existed.
+const CODEX_ACCOUNT_LIMIT = "premium";
+const warnedLimits = new Set<string>();
+
+/** Name of the feature limit these Codex headers describe, or null when they describe the account's own limit. */
+export function codexFeatureLimit(o: PassiveObservation): string | null {
+  const limit = (o.signals["x-codex-active-limit"] ?? "").trim().toLowerCase();
+  if (!limit || limit === CODEX_ACCOUNT_LIMIT) return null;
+  if (!warnedLimits.has(limit) && !limit.startsWith("imagegen")) {
+    warnedLimits.add(limit);
+    console.warn(`passive Codex headers for limit "${limit}" are not the account limit; using the active check instead`);
+  }
+  return limit;
+}
+
+/** Whether an observation's headers describe the account's own limits (and so can be shown). */
+export function describesAccountLimits(family: string, o: PassiveObservation | null): boolean {
+  return !!o && (family !== "codex" || codexFeatureLimit(o) === null);
+}
+
 export function parsePassiveCodex(o: PassiveObservation): PassiveCodex | null {
   const s = o.signals;
+  if (codexFeatureLimit(o) !== null) return null;
   const windows: PassiveCodexWindow[] = [];
   for (const slot of ["primary", "secondary"]) {
     const used = num(s[`x-codex-${slot}-used-percent`]);
     const minutes = num(s[`x-codex-${slot}-window-minutes`]);
-    // An unused slot is reported as 0% over a 0-minute window (promax reports one window only).
+    // An unused slot is reported as 0% over a 0-minute window (promax has no 5-hour limit).
     if (used == null || minutes == null || minutes <= 0) continue;
     let resets = epochIso(s[`x-codex-${slot}-reset-at`]);
     const after = num(s[`x-codex-${slot}-reset-after-seconds`]);
@@ -82,8 +107,8 @@ export function parsePassiveCodex(o: PassiveObservation): PassiveCodex | null {
   const unlimited = (s["x-codex-credits-unlimited"] ?? "").toLowerCase() === "true";
   return {
     plan_type: s["x-codex-plan-type"] || null,
-    // Classified by window length, not header slot: promax has reported both its weekly and,
-    // since 2026-11-03, a 24-hour window as "primary". Same cut-offs as the active check.
+    // Classified by window length, not header slot: promax reports its weekly window as "primary".
+    // Same cut-offs as the active check.
     ...classifyCodexWindows(windows),
     credits_balance: unlimited ? "unlimited" : s["x-codex-credits-balance"] || null,
   };

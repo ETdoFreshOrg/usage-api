@@ -146,7 +146,7 @@ test("parseCodexUsage classifies the normal 5-hour and 7-day windows by duration
   assert.deepEqual(parsed.secondary, parsed.seven_day);
 });
 
-// etdofresh@gmail.com (promax) since 2026-11-03 21:48 CST: one 24-hour window, nothing else.
+// OpenAI already uses 24-hour windows (its image quota); a Codex one must not read as 5-hour.
 test("parseCodexUsage files a 24-hour window as one_day, not as a 5-hour window", () => {
   const oneDayRaw = { used_percent: 12, limit_window_seconds: 24 * 60 * 60, reset_at: 1793850421 };
   const parsed = parseCodexUsage({ plan_type: "promax", rate_limit: { primary_window: oneDayRaw, secondary_window: null } });
