@@ -4,9 +4,8 @@
  * Window classification is the load-bearing detail here. OpenAI's
  * primary_window / secondary_window slots are positional, not semantic: a
  * seven-day window routinely arrives in `primary_window` with
- * `secondary_window` null, and since 2026-11-03 promax reports a single
- * 24-hour window there instead. So five_hour / one_day / seven_day is decided
- * by `limit_window_seconds`, never by slot order.
+ * `secondary_window` null. So five_hour / one_day (24 h) / seven_day is
+ * decided by `limit_window_seconds`, never by slot order.
  *
  * That is also why this does not read 9router's own /api/usage endpoint.
  * 9router maps those slots by position into names like "session", and drops
@@ -53,7 +52,7 @@ export interface CodexResetCredits {
 export interface CodexUsage {
   plan_type: string | null;
   five_hour: CodexWindow | null;
-  /** A 24-hour window (promax since 2026-11-03); null when OpenAI reports none. */
+  /** A 24-hour window; null when OpenAI reports none (the usual case). */
   one_day: CodexWindow | null;
   seven_day: CodexWindow | null;
   /** @deprecated Compatibility alias for five_hour. */

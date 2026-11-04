@@ -1,7 +1,7 @@
 /**
  * Codex window slots. OpenAI's primary/secondary header and response slots are positional, so
- * every Codex window is filed by its length instead: five_hour, one_day (promax has reported a
- * single 24-hour window since 2026-11-03) or seven_day. Shared by the active usage check
+ * every Codex window is filed by its length instead: five_hour, one_day (24-hour windows, as
+ * OpenAI already uses for its image quota) or seven_day. Shared by the active usage check
  * (providers/codex.ts) and the passive CPA header path (passive.ts).
  */
 

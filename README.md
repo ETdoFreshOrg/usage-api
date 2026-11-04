@@ -64,9 +64,8 @@ Returns per-provider:
 Codex usage exposes semantic `five_hour`, `one_day` and `seven_day` windows,
 each filed by its length (`window_minutes`), never by OpenAI's raw slot: up to
 12 h is `five_hour`, up to 3 days `one_day`, longer `seven_day`. Any of them may
-be `null` when OpenAI is not reporting that limit. Since 2026-11-03 the promax
-account (etdofresh@gmail.com) reports only a 24-hour window, so it has
-`one_day` and no `seven_day`. Each window carries pacing (`expected_percent` /
+be `null` when OpenAI is not reporting that limit; `one_day` usually is. Each
+window carries pacing (`expected_percent` /
 `slack`) over its own length. The deprecated `primary` and `secondary` fields
 remain as compatibility aliases for `five_hour` and `seven_day`; they do not
 mirror OpenAI's variable raw slot positions, and the 24-hour window is only in
@@ -160,8 +159,13 @@ which usage-api already reads every 30 s for account discovery. Anthropic's
 headers carry the account's current weekly (and 5-hour) usage, so these
 numbers are used whenever they are newer than the last active check
 (`dataSource: "passive"`). Codex windows are classified by
-`window-minutes`, not header slot (promax has reported both its weekly and,
-since 2026-11-03, a 24-hour window as `primary`). Claude headers for an account with no 5-hour limit (or that
+`window-minutes`, not header slot (promax reports its weekly window as
+`primary`). Codex headers are only read as the account's limits when
+`x-codex-active-limit` is `premium` (or absent). An image request reports
+`imagegen_premium` and the 24-hour image quota instead; those headers are
+ignored, and the account keeps its last active check (they also do not slow the
+backup checks down). On 2026-11-03 such headers had briefly replaced the promax
+account's weekly window with the image quota. Claude headers for an account with no 5-hour limit (or that
 has hit its weekly limit) carry no `5h` fields; the last active check's
 `five_hour` is kept then. Headers round down, so within the same window the higher of the
 passive and last active value is shown.

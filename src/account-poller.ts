@@ -12,7 +12,7 @@
  *     only returns to the normal cadence after a success.
  */
 import { RateLimitError, Staleness } from "./cache.js";
-import { mergePassive, PassiveObservation } from "./passive.js";
+import { describesAccountLimits, mergePassive, PassiveObservation } from "./passive.js";
 
 const envSec = (name: string, fallback: number) => {
   const n = Number(process.env[name]);
@@ -136,8 +136,11 @@ export class AccountPoller {
     if (!this.running) this.schedule(this.dueAt());
   }
 
+  // Only headers that describe the account's own limits stand in for active checks; a run of
+  // image requests (whose headers carry the image quota) leaves the normal cadence in place.
   private passiveFresh(): boolean {
-    const at = this.observation ? Date.parse(this.observation.observedAt) : NaN;
+    if (!describesAccountLimits(this.family, this.observation)) return false;
+    const at = Date.parse(this.observation!.observedAt);
     return Number.isFinite(at) && this.now() - at < ACCOUNT_TIMING.passiveFreshSec * 1000;
   }
 

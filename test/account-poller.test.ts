@@ -33,6 +33,21 @@ test("idle accounts are checked every 30 min, busy ones every 60 min", async () 
   p.poller.stop();
 });
 
+test("image-request headers neither replace a Codex account's numbers nor slow its checks", async () => {
+  const weekReset = T0 + 5 * 86_400_000;
+  const weekly = { plan_type: "promax", seven_day: { used_percent: 100, resets_at: iso(weekReset), window_minutes: 10080 }, additional: [] };
+  const p = make([weekly], "codex");
+  await p.poller.tick();
+  p.poller.observe({ observedAt: iso(T0 + 1000), signals: { "x-codex-active-limit": "imagegen_premium",
+    "x-codex-primary-used-percent": "0", "x-codex-primary-window-minutes": "1440", "x-codex-primary-reset-at": String((T0 + 86_400_000) / 1000) } });
+  const snap = p.poller.snapshot();
+  assert.equal(snap.dataSource, "active");
+  assert.equal((snap.data as any).seven_day.used_percent, 100);
+  assert.equal(p.passive.length, 0);
+  assert.equal(p.next() - T0, 30 * 60_000, "ignored headers keep the idle cadence");
+  p.poller.stop();
+});
+
 test("fresh passive headers win over the older active check and report their source", async () => {
   const resetFar = T0 + 5 * 86_400_000;
   const p = make([week(10, resetFar)]);
