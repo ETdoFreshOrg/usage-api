@@ -150,10 +150,12 @@ const CURATED_HISTORY_SERIES = [
   { key: "claude:seven_day_design", label: "Claude Design 7-day", color: "#fed7aa", default: false },
   { key: "claude:seven_day_fable", label: "Claude Fable 7-day", color: "#c2410c", default: true },
   { key: "codex:five_hour", label: "Codex 5-hour", color: "#22c55e", default: false },
+  { key: "codex:one_day", label: "Codex 24-hour", color: "#4ade80", default: true },
   { key: "codex:seven_day", label: "Codex 7-day", color: "#86efac", default: true },
   { key: "codex:GPT-5.3-Codex-Spark five_hour", label: "Codex Spark 5-hour", color: "#06b6d4", default: false },
   { key: "codex:GPT-5.3-Codex-Spark seven_day", label: "Codex Spark 7-day", color: "#67e8f9", default: false },
   { key: "codex2:five_hour", label: "Codex #2 5-hour", color: "#3b82f6", default: false },
+  { key: "codex2:one_day", label: "Codex #2 24-hour", color: "#60a5fa", default: false },
   { key: "codex2:seven_day", label: "Codex #2 7-day", color: "#93c5fd", default: false },
   { key: "codex2:GPT-5.3-Codex-Spark five_hour", label: "Codex #2 Spark 5-hour", color: "#8b5cf6", default: false },
   { key: "codex2:GPT-5.3-Codex-Spark seven_day", label: "Codex #2 Spark 7-day", color: "#c4b5fd", default: false },
@@ -267,10 +269,15 @@ function renderCodex(snap) {
   const extras = (d.additional ?? []).map(a => `
     <div class="group-label">${escapeHtml(a.name)}</div>
     ${windowRow("5-hour", a.five_hour)}
+    ${windowRow("24-hour", a.one_day)}
     ${windowRow("7-day", a.seven_day)}
   `).join("");
-  const fiveHourNotice = !d.five_hour
+  // Codex files each window by its length; an account can report a 24-hour window instead of the others.
+  const fiveHourNotice = !d.five_hour && !d.one_day
     ? `<div class="sub">5-hour limit is not currently reported by Codex</div>`
+    : "";
+  const weeklyNotice = !d.seven_day && (d.five_hour || d.one_day)
+    ? `<div class="sub">no 7-day limit is currently reported by Codex</div>`
     : "";
   const resetCredits = renderResetCredits(d.reset_credits, d.reset_credits_checked_at);
   const bal = d.credits_balance;
@@ -278,8 +285,10 @@ function renderCodex(snap) {
     bal === "unlimited" ? "unlimited" : escapeHtml(Number.isFinite(Number(bal)) ? String(Number(bal)) : bal)}</div>`;
   return `
     ${windowRow("5-hour", d.five_hour)}
+    ${windowRow("24-hour", d.one_day)}
     ${windowRow("7-day", d.seven_day)}
     ${fiveHourNotice}
+    ${weeklyNotice}
     ${extras}
     ${creditsLine}
     ${resetCredits}

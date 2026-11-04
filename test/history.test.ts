@@ -79,6 +79,18 @@ test("HistoryStore backfill wraps below zero back to 100 percent", () => {
   assert.deepEqual(fine.series[0].points.map((p) => p.expectedValue), [100, 20]);
 });
 
+test("HistoryStore backfills a 24-hour series over a 24-hour window", () => {
+  const store = new HistoryStore({ retentionMs: Infinity });
+
+  store.recordProvider("codex", { one_day: { used_percent: 5, resets_at: null } }, new Date("2026-01-02T00:00:00.000Z"));
+  store.recordProvider("codex", { one_day: { used_percent: 6, expected_percent: 50, resets_at: null } }, new Date("2026-01-02T06:00:00.000Z"));
+
+  const fine = store.toSeries("fine");
+
+  assert.equal(fine.series[0].metric, "one_day");
+  assert.deepEqual(fine.series[0].points.map((p) => p.expectedValue), [25, 50]);
+});
+
 test("HistoryStore can aggregate percentage samples into hourly and daily graph points", () => {
   const store = new HistoryStore({ retentionMs: 8 * 24 * 60 * 60 * 1000 });
 

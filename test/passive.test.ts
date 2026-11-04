@@ -118,3 +118,36 @@ test("Claude headers without a 5h window keep the active check's 5h window; head
   const higher = mergePassive("claude", active, "2026-11-03T22:00:00Z", readObservation(claude5hQuota), now);
   assert.equal(higher.five_hour.utilization, 100);
 });
+
+// etdofresh@gmail.com (promax) from CPA on 2026-11-03 21:48 CST: a 24-hour primary window, empty secondary.
+const promaxDayQuota = { observed_at: "2026-11-03T21:48:28.305910945-06:00", signals: {
+  "X-Codex-Plan-Type": "promax", "X-Codex-Primary-Over-Secondary-Limit-Percent": "0",
+  "X-Codex-Primary-Reset-After-Seconds": "86359", "X-Codex-Primary-Reset-At": "1793850421",
+  "X-Codex-Primary-Used-Percent": "0", "X-Codex-Primary-Window-Minutes": "1440",
+  "X-Codex-Secondary-Reset-After-Seconds": "0", "X-Codex-Secondary-Used-Percent": "0", "X-Codex-Secondary-Window-Minutes": "0" } };
+
+test("a 24-hour Codex header window becomes one_day, not five_hour", () => {
+  const p = parsePassiveCodex(readObservation(promaxDayQuota)!)!;
+  assert.deepEqual(p.one_day, { used_percent: 0, resets_at: "2026-11-05T03:47:01.000Z", window_minutes: 1440 });
+  assert.equal(p.five_hour, null);
+  assert.equal(p.seven_day, null);
+  assert.equal(p.plan_type, "promax");
+});
+
+test("Codex merge replaces a stale weekly window with the 24-hour one and stops after it resets", () => {
+  const now = Date.parse("2026-11-04T04:30:00Z");
+  // The active check from earlier that day still had the weekly window.
+  const active = { plan_type: "promax", five_hour: null, seven_day: { used_percent: 100, resets_at: "2026-11-09T21:58:56.000Z", window_minutes: 10080 },
+    additional: [], reset_credits: { available_count: 0 } };
+  const merged = mergePassive("codex", active, "2026-11-03T20:00:00Z", readObservation(promaxDayQuota), now);
+  assert.equal(merged.one_day.used_percent, 0);
+  assert.equal(merged.one_day.window_minutes, 1440);
+  assert.equal(merged.five_hour, null);
+  assert.equal(merged.seven_day, null);
+  assert.equal(merged.primary, null);
+  assert.equal(merged.secondary, null);
+  assert.equal(merged.reset_credits.available_count, 0);
+  // Once the 24-hour window has reset, its header numbers are out of date.
+  assert.equal(mergePassive("codex", active, "2026-11-03T20:00:00Z", readObservation(promaxDayQuota),
+    Date.parse("2026-11-05T03:48:00Z")), null);
+});

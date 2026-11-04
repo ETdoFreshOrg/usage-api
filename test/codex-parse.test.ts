@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { RateLimitError } from "../src/cache.ts";
 import { createCodexUsageFetcher, parseCodexUsage, parseResetCredits } from "../src/providers/codex.ts";
+import { codexWindowSlot, reclassifyCodexWindows } from "../src/codex-windows.ts";
 import type { RouterConnection } from "../src/providers/ninerouter.ts";
 
 const fiveHourRaw = {
@@ -140,8 +141,50 @@ test("parseCodexUsage classifies the normal 5-hour and 7-day windows by duration
   assert.equal(parsed.five_hour?.window_minutes, 300);
   assert.equal(parsed.seven_day?.used_percent, 42);
   assert.equal(parsed.seven_day?.window_minutes, 10080);
+  assert.equal(parsed.one_day, null);
   assert.deepEqual(parsed.primary, parsed.five_hour);
   assert.deepEqual(parsed.secondary, parsed.seven_day);
+});
+
+// etdofresh@gmail.com (promax) since 2026-11-03 21:48 CST: one 24-hour window, nothing else.
+test("parseCodexUsage files a 24-hour window as one_day, not as a 5-hour window", () => {
+  const oneDayRaw = { used_percent: 12, limit_window_seconds: 24 * 60 * 60, reset_at: 1793850421 };
+  const parsed = parseCodexUsage({ plan_type: "promax", rate_limit: { primary_window: oneDayRaw, secondary_window: null } });
+  assert.deepEqual(parsed.one_day, { used_percent: 12, resets_at: "2026-11-05T03:47:01.000Z", window_minutes: 1440 });
+  assert.equal(parsed.five_hour, null);
+  assert.equal(parsed.seven_day, null);
+  // The legacy aliases keep their 5-hour / 7-day meanings, so a 24-hour window is in neither.
+  assert.equal(parsed.primary, null);
+  assert.equal(parsed.secondary, null);
+
+  const withWeekly = parseCodexUsage({ rate_limit: { primary_window: sevenDayRaw, secondary_window: oneDayRaw } });
+  assert.equal(withWeekly.one_day?.used_percent, 12);
+  assert.equal(withWeekly.seven_day?.used_percent, 42);
+  assert.equal(withWeekly.five_hour, null);
+});
+
+test("Codex windows are filed by length with room for modest server-side changes", () => {
+  assert.equal(codexWindowSlot(300), "five_hour");
+  assert.equal(codexWindowSlot(720), "five_hour");
+  assert.equal(codexWindowSlot(721), "one_day");
+  assert.equal(codexWindowSlot(1440), "one_day");
+  assert.equal(codexWindowSlot(4320), "one_day");
+  assert.equal(codexWindowSlot(4321), "seven_day");
+  assert.equal(codexWindowSlot(10080), "seven_day");
+  assert.equal(codexWindowSlot(0), null);
+  assert.equal(codexWindowSlot(undefined), null);
+});
+
+test("results saved before the 24-hour slot existed are re-filed by length", () => {
+  const day = { used_percent: 3, resets_at: "2026-11-05T03:47:01.000Z", window_minutes: 1440 };
+  assert.deepEqual(reclassifyCodexWindows({ five_hour: day, seven_day: null }), { five_hour: null, one_day: day, seven_day: null });
+  const five = { used_percent: 1, resets_at: null, window_minutes: 300 };
+  const week = { used_percent: 2, resets_at: null, window_minutes: 10080 };
+  assert.deepEqual(reclassifyCodexWindows({ five_hour: five, seven_day: week }), { five_hour: five, one_day: null, seven_day: week });
+  // A window of unknown length stays in the slot it was saved in.
+  const unknown = { used_percent: 9, resets_at: null, window_minutes: 0 };
+  assert.deepEqual(reclassifyCodexWindows({ five_hour: unknown }), { five_hour: unknown, one_day: null, seven_day: null });
+  assert.deepEqual(reclassifyCodexWindows(null), { five_hour: null, one_day: null, seven_day: null });
 });
 
 test("parseCodexUsage reports a suspended 5-hour window as null when weekly usage moves to primary", () => {
@@ -168,6 +211,7 @@ test("parseCodexUsage reports a suspended 5-hour window as null when weekly usag
 test("parseCodexUsage does not manufacture zero-valued windows when both are absent", () => {
   const parsed = parseCodexUsage({ rate_limit: { primary_window: null, secondary_window: null } });
   assert.equal(parsed.five_hour, null);
+  assert.equal(parsed.one_day, null);
   assert.equal(parsed.seven_day, null);
   assert.equal(parsed.primary, null);
   assert.equal(parsed.secondary, null);

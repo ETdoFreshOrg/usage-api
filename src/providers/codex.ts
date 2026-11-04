@@ -4,8 +4,9 @@
  * Window classification is the load-bearing detail here. OpenAI's
  * primary_window / secondary_window slots are positional, not semantic: a
  * seven-day window routinely arrives in `primary_window` with
- * `secondary_window` null. So five_hour vs. seven_day is decided by
- * `limit_window_seconds`, never by slot order.
+ * `secondary_window` null, and since 2026-11-03 promax reports a single
+ * 24-hour window there instead. So five_hour / one_day / seven_day is decided
+ * by `limit_window_seconds`, never by slot order.
  *
  * That is also why this does not read 9router's own /api/usage endpoint.
  * 9router maps those slots by position into names like "session", and drops
@@ -17,21 +18,19 @@
  * refreshes the token, and this module only reads it.
  */
 import { throwIfRateLimited } from "../cache.js";
+import { classifyCodexWindows, CodexWindow, CodexWindows } from "../codex-windows.js";
 import { findConnection, RouterConnection } from "./ninerouter.js";
 
 const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 
-export interface CodexWindow {
-  used_percent: number;
-  resets_at: string | null;
-  window_minutes: number;
-}
+export type { CodexWindow } from "../codex-windows.js";
 
 export interface CodexAdditionalLimit {
   name: string;
   metered_feature: string | null;
   five_hour: CodexWindow | null;
+  one_day: CodexWindow | null;
   seven_day: CodexWindow | null;
   /** @deprecated Compatibility alias for five_hour. */
   primary: CodexWindow | null;
@@ -54,6 +53,8 @@ export interface CodexResetCredits {
 export interface CodexUsage {
   plan_type: string | null;
   five_hour: CodexWindow | null;
+  /** A 24-hour window (promax since 2026-11-03); null when OpenAI reports none. */
+  one_day: CodexWindow | null;
   seven_day: CodexWindow | null;
   /** @deprecated Compatibility alias for five_hour. */
   primary: CodexWindow | null;
@@ -100,15 +101,8 @@ function parseWindow(w: RawWindow | undefined): CodexWindow | null {
   };
 }
 
-function classifyWindows(rateLimit: RawRateLimit): { five_hour: CodexWindow | null; seven_day: CodexWindow | null } {
-  const windows = [parseWindow(rateLimit?.primary_window), parseWindow(rateLimit?.secondary_window)]
-    .filter((w): w is CodexWindow => w !== null);
-  return {
-    // Allow modest server-side duration changes without confusing a short
-    // session window with the weekly window.
-    five_hour: windows.find((w) => w.window_minutes > 0 && w.window_minutes <= 24 * 60) ?? null,
-    seven_day: windows.find((w) => w.window_minutes > 24 * 60) ?? null,
-  };
+function classifyWindows(rateLimit: RawRateLimit): CodexWindows {
+  return classifyCodexWindows([parseWindow(rateLimit?.primary_window), parseWindow(rateLimit?.secondary_window)]);
 }
 
 export function parseCodexUsage(json: RawCodexUsageResponse): Omit<CodexUsage, "reset_credits"> {

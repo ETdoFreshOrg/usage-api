@@ -72,8 +72,8 @@ export function accountStaleness(fetchedAt: string | null, now = Date.now()): St
  */
 function resetTimes(data: any, family: string): number[] {
   if (!data || typeof data !== "object") return [];
-  const windows = [data.seven_day, family === "claude" ? null : data.five_hour, data.seven_day_fable, data.seven_day_design,
-    ...(Array.isArray(data.additional) ? data.additional.flatMap((a: any) => [a?.five_hour, a?.seven_day]) : [])];
+  const windows = [data.seven_day, family === "claude" ? null : data.five_hour, data.one_day, data.seven_day_fable, data.seven_day_design,
+    ...(Array.isArray(data.additional) ? data.additional.flatMap((a: any) => [a?.five_hour, a?.one_day, a?.seven_day]) : [])];
   return windows.map(w => Date.parse(w?.resets_at ?? "")).filter(Number.isFinite);
 }
 

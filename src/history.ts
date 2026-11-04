@@ -270,6 +270,7 @@ function round(value: number) {
 function expectedWindowMs(provider: string, metric: string) {
   if (provider === "zai" && metric === "monthly") return 30 * 24 * 60 * 60 * 1000;
   if (metric.includes("seven_day") || metric.includes("secondary")) return 7 * 24 * 60 * 60 * 1000;
+  if (metric.includes("one_day")) return 24 * 60 * 60 * 1000;
   return 5 * 60 * 60 * 1000;
 }
 
