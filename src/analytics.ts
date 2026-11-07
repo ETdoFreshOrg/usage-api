@@ -22,9 +22,10 @@ export class AnalyticsReader {
   private pending: Promise<unknown> | null = null;
   constructor(private url:string, private key:string, private fetcher:typeof fetch=fetch) {}
   async get():Promise<unknown> {
-    if(this.cache && Date.now()-this.cache.at<60000) return this.cache.value;
-    if(this.pending) return this.pending;
-    this.pending=this.read().finally(()=>{this.pending=null});return this.pending;
+    if ((!this.cache || Date.now()-this.cache.at>=60000) && !this.pending) {
+      this.pending=this.read().catch(()=>null).finally(()=>{this.pending=null});
+    }
+    return this.cache?.value ?? null;
   }
   private async read() {
     const now=Date.now();
@@ -32,9 +33,10 @@ export class AnalyticsReader {
     for(const days of [1,7,30]) {
       const r=await this.fetcher(this.url.replace(/\/$/,'')+'/v0/management/monitoring/analytics',{
         method:'POST',headers:{Authorization:'Bearer '+this.key,'Content-Type':'application/json'},
-        body:JSON.stringify({from_ms:now-days*86400000,to_ms:now,time_zone:'UTC',include:{summary:true,timeline:true,model_stats:true,granularity:days===1?'hour':'day'}}),signal:AbortSignal.timeout(15000)});
+        body:JSON.stringify({from_ms:now-days*86400000,to_ms:now,time_zone:'UTC',include:{summary:true,timeline:true,model_stats:true,granularity:days===1?'hour':'day'}}),signal:AbortSignal.timeout(60000)});
       if(!r.ok) throw new Error('Analytics unavailable');
       ranges.push(parseAnalytics(await r.json(),days));
+      this.cache={at:Date.now(),value:{ranges:[...ranges]}};
     }
     const value={ranges};this.cache={at:Date.now(),value};return value;
   }
