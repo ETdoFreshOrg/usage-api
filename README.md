@@ -339,3 +339,16 @@ up on its own.
 OpenRouter retains the configured key's `usage`, `limit` and `limit_remaining`. It additionally reads `/api/v1/credits` for `credits_balance` (USD account credits minus account usage). If `OPENROUTER_MANAGEMENT_KEY` is configured, analytics provides `spend_7d` for the exact rolling seven-day `spend_start`/`spend_end` period. Account balance and spending are independent from API-key usage/allowance. Missing/denied/malformed/truncated financial data is null, with `balance_error` / `spend_error`; it is not reported as zero and does not discard a successful key read. Requests use bounded timeouts.
 
 The financial tests use mocked provider responses and do not query real accounts. This change is prepared on a branch because pushing production main auto-deploys this service.
+
+## ETbot analytics
+
+The owner-only `list_accounts` result includes optional `analytics.ranges`
+(1, 7, 30 days; UTC hourly/daily buckets) from CPA Manager's persisted
+monitoring analytics, using the existing server-side CPA_MANAGER configuration.
+No events, account identities or credentials are forwarded by this adapter.
+Costs are CPA rate-table estimates, not billed subscription spending. Pricing
+coverage is unknown unless an active zero-priced model proves it incomplete;
+in that case aggregate/chart cost is null. Source retention is unknown unless
+CPA explicitly reports partial coverage. Missing values remain null. This does
+not reconstruct requests that CPA never recorded. Reads cache for 60 seconds
+and share an in-flight refresh. Analytics failures leave quotas available.

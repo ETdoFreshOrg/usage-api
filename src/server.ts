@@ -1,3 +1,4 @@
+import { AnalyticsReader } from "./analytics.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -213,6 +214,7 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
+const analyticsReader = process.env.CPA_MANAGER_KEY ? new AnalyticsReader(process.env.CPA_MANAGER_URL ?? "http://etzminisforumx1pro.lan:18317", process.env.CPA_MANAGER_KEY) : null;
 const recentRequests = process.env.CPA_MANAGER_KEY
   ? new RecentRequests(process.env.CPA_MANAGER_URL ?? "http://etzminisforumx1pro.lan:18317", process.env.CPA_MANAGER_KEY)
   : null;
@@ -364,6 +366,7 @@ const mcpEnabled = installMcp(app, {
   store: OWNER_KEY
     ? new OAuthStore(process.env.USAGE_MCP_OAUTH_DB ?? path.join(path.dirname(HISTORY_FILE), "mcp-oauth.db"))
     : undefined,
+  getAnalytics: async () => analyticsReader ? await analyticsReader.get() : null,
   getProviders: currentProviders,
   getProxyAccounts: () => cliProxy?.proxyAccounts ?? null,
   getHistory: (granularity) => history.toSeries(granularity),

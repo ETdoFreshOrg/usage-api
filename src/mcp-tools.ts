@@ -19,6 +19,7 @@ export interface ProviderSnapshot {
 }
 
 export interface ToolContext {
+  getAnalytics?: () => Promise<unknown>;
   getProviders: () => Record<string, ProviderSnapshot>;
   getProxyAccounts: () => ProxyAccountStatus[] | null;
   getActivity: (hours: number) => Promise<ActivitySummary | null>;
@@ -206,6 +207,7 @@ export async function callTool(name: string, rawArgs: unknown, ctx: ToolContext)
       const proxy = ctx.getProxyAccounts();
       const paused = proxy === null ? null : proxy.filter(a => !a.enabled).map(a => ({ provider: a.provider, email: a.email }));
       return ok({
+        analytics: ctx.getAnalytics ? await ctx.getAnalytics().catch(() => null) : null,
         as_of: new Date(now).toISOString(),
         accounts: accounts(ctx, provider),
         paused_on_proxy: paused === null ? null : paused.filter(a => !provider || a.provider === provider),
