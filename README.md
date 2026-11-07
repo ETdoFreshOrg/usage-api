@@ -353,3 +353,11 @@ unpriced activity; if no active model has a positive known estimate, cost is nul
 CPA explicitly reports partial coverage. Missing values remain null. This does
 not reconstruct requests that CPA never recorded. Reads cache for 60 seconds
 and share an in-flight background refresh; initial reads may have no analytics. Analytics failures leave quotas available.
+
+Video parity follow-up: ranges also include 90 days. Provider totals come from
+CPA channel_share and hourly/daily provider series from credential_timeline,
+pooled server-side by auth_provider_snapshot; no credential/account identifiers
+are forwarded. Unpriced request counts identify active model rows with no
+positive estimate; zero may mean an unknown rate or a free model, so this is
+conservative. Cache savings and cost-by-type/speed are explicitly unavailable:
+this deployed source does not report those amounts, and no rates are invented.

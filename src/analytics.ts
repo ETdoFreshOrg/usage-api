@@ -11,8 +11,29 @@ export function parseAnalytics(body: any, days: number) {
   const models = body.model_stats.slice(0,200).map((v:any) => ({ model: String(v.model ?? '').slice(0,120), ...metrics(v) }));
   const hasPricedActivity = models.some((v:any) => v.cost_usd > 0);
   const pricingUncertain = models.some((v:any) => v.tokens > 0 && (v.cost_usd === null || v.cost_usd === 0));
+  // Pool only the provider name and numeric measures; identities never leave this adapter.
+  const pool = (rows:any[], bucketed:boolean) => {
+    const groups = new Map<string,any>();
+    for (const row of rows) {
+      const provider = typeof row.auth_provider_snapshot === 'string' && /^[a-z0-9_-]{1,32}$/i.test(row.auth_provider_snapshot) ? row.auth_provider_snapshot.toLowerCase() : 'unknown';
+      const at = bucketed ? number(row.bucket_ms) : undefined;
+      if(bucketed && at === null) continue;
+      const key=provider+':'+(at??'');
+      let item=groups.get(key);
+      if(!item) {item={provider,...(bucketed?{at}:{}),requests:null,tokens:null,cost_usd:null};groups.set(key,item);}
+      for(const [out,source] of [['requests','calls'],['tokens','tokens'],['cost_usd','cost']] as const) {
+        const value=number(row[source]);if(value!==null)item[out]=(item[out]??0)+value;
+      }
+    }
+    return [...groups.values()].map(v=>({...v,cost_usd:v.tokens>0 && v.cost_usd===0 ? null:v.cost_usd}));
+  };
+  const providers=pool(Array.isArray(body.channel_share)?body.channel_share:[],false);
+  const provider_points=pool(Array.isArray(body.credential_timeline)?body.credential_timeline:[],true);
+  const unpricedRequests=models.filter((v:any)=>v.tokens>0 && !(v.cost_usd>0)).reduce((n:number,v:any)=>n+(v.requests??0),0);
   return { days, as_of: number(body.generated_at_ms), source: 'CPA Manager persisted analytics', cost_kind: 'estimated',
     pricing_coverage: pricingUncertain ? 'incomplete' : 'unknown',
+    providers, provider_points, unpriced_requests: unpricedRequests,
+    cache_savings_usd: null, cost_by_type: null, cost_by_speed: null,
     coverage: body.coverage?.raw_complete === false ? 'partial' : 'source_retention_unknown',
     summary: {...metrics(body.summary), cost_usd: pricingUncertain && !hasPricedActivity ? null : number(body.summary.total_cost)},
     points: body.timeline.slice(0,800).filter((v:any)=>number(v.bucket_ms)!==null).map((v:any)=>({ at: v.bucket_ms, ...metrics(v), cost_usd: pricingUncertain && !hasPricedActivity ? null : number(v.cost) })),
@@ -31,10 +52,10 @@ export class AnalyticsReader {
   private async read() {
     const now=Date.now();
     const ranges=[];
-    for(const days of [1,7,30]) {
+    for(const days of [1,7,30,90]) {
       const r=await this.fetcher(this.url.replace(/\/$/,'')+'/v0/management/monitoring/analytics',{
         method:'POST',headers:{Authorization:'Bearer '+this.key,'Content-Type':'application/json'},
-        body:JSON.stringify({from_ms:now-days*86400000,to_ms:now,time_zone:'UTC',include:{summary:true,timeline:true,model_stats:true,granularity:days===1?'hour':'day'}}),signal:AbortSignal.timeout(60000)});
+        body:JSON.stringify({from_ms:now-days*86400000,to_ms:now,time_zone:'UTC',include:{summary:true,timeline:true,model_stats:true,channel_share:true,credential_timeline:true,granularity:days===1?'hour':'day'}}),signal:AbortSignal.timeout(60000)});
       if(!r.ok) throw new Error('Analytics unavailable');
       ranges.push(parseAnalytics(await r.json(),days));
       this.cache={at:Date.now(),value:{ranges:[...ranges]}};
