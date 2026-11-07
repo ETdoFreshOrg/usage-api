@@ -9,12 +9,13 @@ export function parseAnalytics(body: any, days: number) {
     // CPA costs are rate-table estimates, never invoices. Zero on active models may mean missing pricing.
     cost_usd: number(v.cost ?? v.total_cost) });
   const models = body.model_stats.slice(0,200).map((v:any) => ({ model: String(v.model ?? '').slice(0,120), ...metrics(v) }));
+  const hasPricedActivity = models.some((v:any) => v.cost_usd > 0);
   const pricingUncertain = models.some((v:any) => v.tokens > 0 && (v.cost_usd === null || v.cost_usd === 0));
   return { days, as_of: number(body.generated_at_ms), source: 'CPA Manager persisted analytics', cost_kind: 'estimated',
     pricing_coverage: pricingUncertain ? 'incomplete' : 'unknown',
     coverage: body.coverage?.raw_complete === false ? 'partial' : 'source_retention_unknown',
-    summary: {...metrics(body.summary), cost_usd: pricingUncertain ? null : number(body.summary.total_cost)},
-    points: body.timeline.slice(0,800).filter((v:any)=>number(v.bucket_ms)!==null).map((v:any)=>({ at: v.bucket_ms, ...metrics(v), cost_usd: pricingUncertain ? null : number(v.cost) })),
+    summary: {...metrics(body.summary), cost_usd: pricingUncertain && !hasPricedActivity ? null : number(body.summary.total_cost)},
+    points: body.timeline.slice(0,800).filter((v:any)=>number(v.bucket_ms)!==null).map((v:any)=>({ at: v.bucket_ms, ...metrics(v), cost_usd: pricingUncertain && !hasPricedActivity ? null : number(v.cost) })),
     models: models.map((v:any)=>({...v,cost_usd:v.tokens>0 && v.cost_usd===0 ? null:v.cost_usd})) };
 }
 export class AnalyticsReader {
