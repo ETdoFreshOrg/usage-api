@@ -348,7 +348,8 @@ monitoring analytics, using the existing server-side CPA_MANAGER configuration.
 No events, account identities or credentials are forwarded by this adapter.
 Costs are CPA rate-table estimates, not billed subscription spending. Pricing
 coverage is unknown unless an active zero-priced model proves it incomplete;
-in that case aggregate/chart cost is null. Source retention is unknown unless
+in that case aggregate/chart costs are known priced subtotals, excluding
+unpriced activity; if no active model has a positive known estimate, cost is null. Source retention is unknown unless
 CPA explicitly reports partial coverage. Missing values remain null. This does
 not reconstruct requests that CPA never recorded. Reads cache for 60 seconds
-and share an in-flight refresh. Analytics failures leave quotas available.
+and share an in-flight background refresh; initial reads may have no analytics. Analytics failures leave quotas available.

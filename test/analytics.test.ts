@@ -10,3 +10,7 @@ test('zero requests and absent token values remain distinct',()=>{
  assert.equal(r.summary.requests,0);assert.equal(r.summary.tokens,null);assert.equal(r.summary.cost_usd,0);
  assert.throws(()=>parseAnalytics({},1));
 });
+test('mixed priced and unpriced models keep the known subtotal with incomplete coverage',()=>{
+ const r=parseAnalytics({summary:{total_calls:2,total_tokens:180,total_cost:1},timeline:[{bucket_ms:100,total_tokens:180,cost:1}],model_stats:[{model:'priced',total_tokens:90,cost:1},{model:'unknown',total_tokens:90,cost:0}]},7);
+ assert.equal(r.summary.cost_usd,1);assert.equal(r.points[0].cost_usd,1);assert.equal(r.models[1].cost_usd,null);assert.equal(r.pricing_coverage,'incomplete');
+});
