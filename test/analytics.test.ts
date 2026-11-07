@@ -20,3 +20,15 @@ test('provider series pool identities while retaining unknowns and numeric total
  assert.equal(r.providers[0].cost_usd,1);assert.ok(!JSON.stringify(r).includes('private@example'));
  assert.equal(r.cost_by_type,null);assert.equal(r.cache_savings_usd,null);
 });
+test('reader returns promptly and shares a slow background fetch across refreshes',async()=>{
+ const {AnalyticsReader}=await import('../src/analytics.js');
+ let unblock!:(r:Response)=>void;let calls=0;
+ const body={summary:{total_calls:0,total_tokens:0,total_cost:0},timeline:[],model_stats:[]};
+ const fetcher=(async()=>{calls++;return calls===1?await new Promise<Response>(r=>unblock=r):new Response(JSON.stringify(body));}) as typeof fetch;
+ const reader=new AnalyticsReader('http://source','server-only',fetcher);
+ assert.equal(await reader.get(),null);assert.equal(await reader.get(),null);assert.equal(calls,1);
+ unblock(new Response(JSON.stringify(body)));
+ await new Promise(r=>setImmediate(r));
+ const result=await reader.get() as any;
+ assert.deepEqual(result.ranges.map((r:any)=>r.days),[1,7,30,90]);assert.equal(calls,4);
+});
