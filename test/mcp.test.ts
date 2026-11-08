@@ -222,3 +222,11 @@ test("usage_history includes the 24-hour series", async () => {
     { metric: "one_day", points: [{ t: hoursFromNow(-1), used_percent: 7, expected_percent: 10 }] },
     { metric: "five_hour", points: [] }]);
 });
+
+test('1MCP exact callback reaches owner consent', async () => {
+ const s=await start();try{
+  const q=new URLSearchParams({client_id:'1mcp-usage',redirect_uri:'https://1mcp.etdofresh.com/oauth/callback/usage',response_type:'code',resource:origin+'/mcp',code_challenge:pkce().challenge,code_challenge_method:'S256',state:'synthetic'});
+  const page=await fetch(s.base+OAUTH_PATH+'/authorize?'+q);assert.equal(page.status,200);assert.match(await page.text(),/owner_key/);
+  q.set('redirect_uri',q.get('redirect_uri')!+'/altered');assert.equal((await fetch(s.base+OAUTH_PATH+'/authorize?'+q)).status,400);
+ }finally{await s.close();}
+});

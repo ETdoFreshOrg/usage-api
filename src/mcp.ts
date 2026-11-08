@@ -57,7 +57,7 @@ export function installMcp(app: express.Express, opts: McpOptions) {
   const oauth = installOAuth(app as any, {
     deps, ownerKey: opts.ownerKey, origin: publicOrigin, oauthPath: OAUTH_PATH, scopes: [SCOPE], defaultScopes: [SCOPE],
     resourceName: "usage-api", firstParty: false, chatgpt: true, claude: true,
-    clients: [{ client_id: CLAUDE_CLIENT_ID, client_name: "Claude", redirect_uris: claudeRedirects }, ETBOT_CLIENT],
+    clients: [{"client_id":"1mcp-usage","client_name":"ET 1MCP","redirect_uris":["https://1mcp.etdofresh.com/oauth/callback/usage"]},{ client_id: CLAUDE_CLIENT_ID, client_name: "Claude", redirect_uris: claudeRedirects }, ETBOT_CLIENT],
     renderConsent: defaultConsentPage(consent), cookieName: "usage_oauth_csrf",
     store: opts.store ?? new OAuthStore(), grantTtl: opts.grantTtl ?? defaultGrantTtl,
     ...(opts.fetchClientMetadata ? { fetchClientMetadata: opts.fetchClientMetadata } : {}),
