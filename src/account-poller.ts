@@ -2,11 +2,14 @@
  * Claude/Codex account poller. The main source of numbers is passive: the
  * rate-limit headers CLIProxyAPI saw on the account's latest real request
  * (see passive.ts), refreshed every account sync at no upstream cost. The
- * active usage-endpoint check is a slow backup that:
- *   - runs every ACCOUNT_BUSY_SECONDS (60 min) while passive data is fresh,
- *     which is mainly for fields headers lack (Fable/Design, Spark, credits);
- *   - runs every ACCOUNT_IDLE_SECONDS (30 min) while passive data is stale or
- *     absent, to catch usage outside CPA (claude.ai, direct CLI logins);
+ * active usage-endpoint check fills the gaps:
+ *   - an idle account (no new passive headers) is checked every
+ *     ACCOUNT_IDLE_SECONDS (5 min), counted from whichever is newer: the last
+ *     check or the last passive observation, so shown data is never much older
+ *     than that and catches usage outside CPA (claude.ai, direct CLI logins);
+ *   - an account in use through CPA, whose headers keep its weekly/5-hour
+ *     numbers seconds old, is still checked every ACCOUNT_BUSY_SECONDS (15 min)
+ *     for the fields headers lack (Fable/Design, Spark, reset credits);
  *   - runs once just after a known window reset;
  *   - backs off on 429 (15 min doubling to 6 h, never below Retry-After) and
  *     only returns to the normal cadence after a success.
@@ -19,18 +22,19 @@ const envSec = (name: string, fallback: number) => {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 };
 export const ACCOUNT_TIMING = {
-  busySec: envSec("ACCOUNT_BUSY_SECONDS", 3600),
-  idleSec: envSec("ACCOUNT_IDLE_SECONDS", 1800),
+  busySec: envSec("ACCOUNT_BUSY_SECONDS", 15 * 60),
+  idleSec: envSec("ACCOUNT_IDLE_SECONDS", 5 * 60),
   /** Passive data younger than this means the account is in use through CPA. */
-  passiveFreshSec: envSec("ACCOUNT_PASSIVE_FRESH_SECONDS", 1800),
+  passiveFreshSec: envSec("ACCOUNT_PASSIVE_FRESH_SECONDS", 5 * 60),
   /** Delay after a known reset before checking, so the provider has rolled the window. */
   afterResetSec: envSec("ACCOUNT_AFTER_RESET_SECONDS", 90),
   rateLimitBaseSec: envSec("ACCOUNT_429_BASE_SECONDS", 900),
   rateLimitMaxSec: envSec("ACCOUNT_429_MAX_SECONDS", 6 * 3600),
   errorBaseSec: envSec("ACCOUNT_ERROR_BASE_SECONDS", 120),
-  // Idle accounts are checked every 30 min, so data up to that age is current.
-  littleStaleSec: envSec("ACCOUNT_STALE_LITTLE_SECONDS", 45 * 60),
-  staleSec: envSec("ACCOUNT_STALE_SECONDS", 3 * 3600),
+  // Shown data is at most ~idleSec old when checks succeed, so twice that means checks are
+  // missing (429 backoff, errors); an hour means the numbers can no longer be trusted.
+  littleStaleSec: envSec("ACCOUNT_STALE_LITTLE_SECONDS", 10 * 60),
+  staleSec: envSec("ACCOUNT_STALE_SECONDS", 3600),
 };
 
 export interface AccountSnapshot {
@@ -154,13 +158,22 @@ export class AccountPoller {
     return { data: this.active, at: this.activeFetchedAt, source: this.active == null ? null : "active" };
   }
 
-  /** Next active check: the normal cadence from the last attempt, or just after a reset if sooner. */
+  /**
+   * Next active check: idleSec after the newer of the last attempt and the passive data being
+   * shown (so an account in use is not re-checked while its headers keep arriving), but no later
+   * than busySec after the last attempt; just after a known reset if sooner.
+   */
   private dueAt(): number {
     if (this.backoffUntil > this.now()) return this.backoffUntil;
     const last = this.lastAttemptAt ? Date.parse(this.lastAttemptAt) : NaN;
     if (!Number.isFinite(last)) return this.nextAt.getTime();
-    let due = last + this.baseIntervalSec() * 1000;
-    for (const reset of resetTimes(this.shown().data, this.family))
+    let due = last + ACCOUNT_TIMING.idleSec * 1000;
+    const shown = this.shown();
+    const shownAt = shown.source === "passive" && shown.at ? Date.parse(shown.at) : NaN;
+    if (Number.isFinite(shownAt))
+      due = Math.min(last + Math.max(ACCOUNT_TIMING.busySec, ACCOUNT_TIMING.idleSec) * 1000,
+        Math.max(due, shownAt + ACCOUNT_TIMING.idleSec * 1000));
+    for (const reset of resetTimes(shown.data, this.family))
       if (reset > last) due = Math.min(due, reset + ACCOUNT_TIMING.afterResetSec * 1000);
     return Math.max(due, this.now());
   }

@@ -51,8 +51,9 @@ Returns per-provider:
 - `ageSec` — seconds since `fetchedAt`
 - `staleness` — `fresh` (< 5 min), `little_stale` (< 1 h), or `stale`; tune
   with `STALE_LITTLE_SECONDS` / `STALE_SECONDS`. Claude/Codex accounts use
-  45 min / 3 h instead (`ACCOUNT_STALE_LITTLE_SECONDS` /
-  `ACCOUNT_STALE_SECONDS`), since idle accounts are checked every 30 min.
+  10 min / 1 h instead (`ACCOUNT_STALE_LITTLE_SECONDS` /
+  `ACCOUNT_STALE_SECONDS`): their data is normally under 5 min old, so
+  `little_stale` means checks are being missed (429 backoff, errors).
   Clients should use this rather than their own age rules.
 - `error` — null when the latest poll succeeded
 - `intervalSec` — current polling interval (self-tunes)
@@ -180,11 +181,16 @@ passive and last active value is shown.
 
 Headers do not carry Fable/Design windows, Spark, Claude plan labels or reset
 credits; those come from the active check (`/api/oauth/usage`,
-`/backend-api/wham/usage`), which is now a slow backup:
+`/backend-api/wham/usage`), which also covers idle accounts:
 
-- every 60 min (`ACCOUNT_BUSY_SECONDS`) while passive data is < 30 min old
-  (`ACCOUNT_PASSIVE_FRESH_SECONDS`), every 30 min (`ACCOUNT_IDLE_SECONDS`)
-  otherwise, to catch use outside CPA
+- every 5 min (`ACCOUNT_IDLE_SECONDS`), counted from the newer of the last
+  check and the last passive observation: an idle account is re-checked every
+  5 min (catching use outside CPA), and one in use through CPA is not, because
+  its headers keep it seconds old. So shown data is at most about 5 min old.
+- every 15 min (`ACCOUNT_BUSY_SECONDS`) at most, even while headers keep
+  arriving, for the fields headers lack (Fable/Design, Spark, reset credits).
+  `intervalSec` reports 15 min while passive data is < 5 min old
+  (`ACCOUNT_PASSIVE_FRESH_SECONDS`), else 5 min.
 - once, 90 s after any known window reset (`ACCOUNT_AFTER_RESET_SECONDS`),
   except Claude's 5-hour window: it rolls several times a day and a reset only
   means no session is open, so it is shown as `null` without a check
