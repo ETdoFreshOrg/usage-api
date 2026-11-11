@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { openFiveHour, parseClaudeResetCredits, parseClaudeUsage } from "../src/providers/anthropic.ts";
+import { classifyClaudeGrant, openFiveHour, parseClaudeResetCredits, parseClaudeUsage } from "../src/providers/anthropic.ts";
 
 test("parseClaudeUsage reads model-scoped weekly limits (Fable) from limits[]", () => {
   const usage = parseClaudeUsage({
@@ -107,4 +107,41 @@ test("openFiveHour drops a missing or already-reset 5-hour window instead of rea
   assert.equal(openFiveHour({ utilization: 99, resets_at: "2026-11-03T22:30:00Z" }, now), null);
   assert.deepEqual(openFiveHour({ utilization: 99, resets_at: "2026-11-03T23:30:00Z" }, now), { utilization: 99, resets_at: "2026-11-03T23:30:00Z" });
   assert.deepEqual(openFiveHour({ utilization: 5, resets_at: null }, now), { utilization: 5, resets_at: null });
+});
+
+test("parseClaudeResetCredits splits weekly and Fable resets by the limits each grant clears", () => {
+  // Grant shapes from a live oauth/usage?cedar_ember=1 response on 2026-11-11.
+  const full = { id: "full-reset-2611", label: "One full limit reset (November 2026)", type: "weekly", resets_left: 1,
+    starts_at: "2026-11-10T21:30:00+00:00", ends_at: "2026-12-10T22:00:00+00:00",
+    clears: ["seven_day", "seven_day_overage_included"], paused: false, usable_now: true };
+  const free = { id: "free_reset_oct_2026", label: "Free limit reset", type: "weekly", resets_left: 1,
+    ends_at: "2026-12-16T04:59:00+00:00", clears: ["seven_day", "seven_day_overage_included"], paused: false, usable_now: true };
+  const fable = { id: "launch-2610-fable", label: "New model launch: one Fable reset for Max, Team Premium and Enterprise Premium",
+    type: "full", resets_left: 1, starts_at: "2026-11-09T18:00:00+00:00", ends_at: "2027-03-09T07:59:00+00:00",
+    clears: ["seven_day_overage_included"], paused: false, usable_now: false };
+  const rc = parseClaudeResetCredits({ eligible: true, grants: [full, free, fable, { ...fable, id: "launch-2610-fable-6mo", resets_left: 0 }] });
+  assert.equal(rc?.available_count, 3);
+  assert.equal(rc?.weekly_available, 2);
+  assert.equal(rc?.fable_available, 1);
+  assert.equal(rc?.other_available, 0);
+  assert.deepEqual(rc?.credits.map((c) => [c.grant_id, c.type, c.usable_now]),
+    [["full-reset-2611", "weekly", true], ["free_reset_oct_2026", "weekly", true], ["launch-2610-fable", "fable", false]]);
+  // The Fable label is not what decides it: a grant's `clears` list is.
+  assert.equal(classifyClaudeGrant({ label: "Fable", clears: ["seven_day"] }), "weekly");
+});
+
+test("parseClaudeResetCredits keeps grants of an unknown kind apart and logs them once", (t) => {
+  const warn = t.mock.method(console, "warn", () => {});
+  const grants = { eligible: true, grants: [
+    { id: "mystery", label: "Something new", resets_left: 2, clears: ["seven_day_mystery"] },
+    { id: "legacy", label: "One full limit reset", resets_left: 1 },
+    { id: "spent", label: "gone", resets_left: 0, clears: ["nope"] },
+  ] };
+  const rc = parseClaudeResetCredits(grants);
+  parseClaudeResetCredits(grants);
+  assert.equal(rc?.available_count, 3);
+  assert.equal(rc?.other_available, 3);
+  assert.equal(rc?.weekly_available, 0);
+  assert.equal(rc?.fable_available, 0);
+  assert.equal(warn.mock.callCount(), 2);
 });

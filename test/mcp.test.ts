@@ -230,3 +230,11 @@ test('1MCP exact callback reaches owner consent', async () => {
   q.set('redirect_uri',q.get('redirect_uri')!+'/altered');assert.equal((await fetch(s.base+OAUTH_PATH+'/authorize?'+q)).status,400);
  }finally{await s.close();}
 });
+
+test("summarizeAccount passes the Claude weekly/Fable reset split through, and omits it for an older snapshot", () => {
+  const split = { ...providers.claude, data: { ...providers.claude.data, reset_credits: { available_count: 3, weekly_available: 1,
+    fable_available: 2, other_available: 0, next_expires_at: hoursFromNow(72), credits: [] } } };
+  assert.deepEqual(summarizeAccount("claude", split, NOW).reset_credits,
+    { available: 3, weekly_available: 1, fable_available: 2, other_available: 0, next_expires_at: hoursFromNow(72) });
+  assert.deepEqual(summarizeAccount("claude", providers.claude, NOW).reset_credits, { available: 2, next_expires_at: hoursFromNow(72) });
+});

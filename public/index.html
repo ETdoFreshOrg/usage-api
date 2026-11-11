@@ -272,9 +272,19 @@ function renderClaude(snap) {
     ${renderResetCredits(d.reset_credits, d.reset_credits_checked_at)}
   `;
 }
+// Claude splits its resets by the limit they clear; Codex (and an older API) gives one count.
+function resetCreditCounts(rc) {
+  const n = (count, what) => `${count} ${what}reset${count === 1 ? "" : "s"}`;
+  if (typeof rc.weekly_available !== "number") return n(rc.available_count, "full ");
+  const parts = [];
+  if (rc.weekly_available > 0) parts.push(n(rc.weekly_available, "weekly "));
+  if (rc.fable_available > 0) parts.push(n(rc.fable_available, "Fable "));
+  if (rc.other_available > 0) parts.push(n(rc.other_available, "other "));
+  return parts.join(" · ");
+}
 function renderResetCredits(rc, checkedAt) {
   return rc && rc.available_count > 0 ? `
-    <div class="sub" title="${escapeHtml(checkedAt ? `Checked ${fmtTime(checkedAt)}` : '')}">↻ ${rc.available_count} full reset${rc.available_count === 1 ? "" : "s"} available${
+    <div class="sub" title="${escapeHtml(checkedAt ? `Checked ${fmtTime(checkedAt)}` : '')}">↻ ${resetCreditCounts(rc)} available${
       rc.next_expires_at ? ` · next expires ${fmtRel(rc.next_expires_at)} (${fmtTime(rc.next_expires_at)})` : ""}</div>
   ` : "";
 }

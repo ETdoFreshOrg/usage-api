@@ -77,6 +77,14 @@ Claude usage also has `five_hour` (`utilization`, `resets_at`, plus pacing
 have a 5-hour limit, so it is `null` for accounts without one, while no session
 is open, and once its reset time has passed; never read `null` as 0%.
 
+Claude `reset_credits` splits its `available_count` by the limit each reset
+clears, read from the grant's own `clears` list: `weekly_available` (clears the
+account-wide weekly limit, `seven_day`), `fable_available` (clears only the Fable
+weekly limit, `seven_day_overage_included`) and `other_available` (a kind not
+recognized yet; logged once per grant). Each entry in `credits` carries the
+same `type`, plus `grant_id`, `clears` and Anthropic's `usable_now`. Codex has
+one count, as before.
+
 ## Subscription renewal dates
 
 Each Claude/Codex account can carry a manually entered next billing date.
@@ -119,7 +127,7 @@ credits or change CLIProxyAPI.
 
 | Tool | What it returns |
 | --- | --- |
-| `list_accounts(provider?)` | Each Claude/Codex account: weekly %, reset time, pace (`weekly` is `null` for an account with no weekly limit), 5-hour window (Codex, and Claude accounts that have one; `null` otherwise), 24-hour window (`one_day`, Codex only; `null` where there is none), reset-credit count (read-only), freshness, proxy status; accounts paused on the proxy; other providers with data |
+| `list_accounts(provider?)` | Each Claude/Codex account: weekly %, reset time, pace (`weekly` is `null` for an account with no weekly limit), 5-hour window (Codex, and Claude accounts that have one; `null` otherwise), 24-hour window (`one_day`, Codex only; `null` where there is none), reset-credit count (read-only; Claude also split into weekly/Fable/other), freshness, proxy status; accounts paused on the proxy; other providers with data |
 | `get_usage(account)` | Full detail for one key (`claude3`, `codex`, `zai`, ...) |
 | `suggest_account(provider?)` | Accounts ranked by room for more work (blocked last); an account with no weekly limit is ranked by its 24-hour window (`ranked_by`) |
 | `usage_history(account, days?, granularity?)` | Weekly (and 5-hour / 24-hour, where the account has them) % over time |

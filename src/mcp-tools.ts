@@ -133,6 +133,12 @@ export function summarizeAccount(key: string, p: ProviderSnapshot, now = Date.no
     // Read-only count of reset credits; nothing here can use one.
     reset_credits: d?.reset_credits ? {
       available: num(d.reset_credits.available_count) ?? 0,
+      // Claude only: weekly clears the account-wide weekly limit, fable only the Fable one.
+      ...(family === "claude" && num(d.reset_credits.weekly_available) != null ? {
+        weekly_available: num(d.reset_credits.weekly_available) ?? 0,
+        fable_available: num(d.reset_credits.fable_available) ?? 0,
+        other_available: num(d.reset_credits.other_available) ?? 0,
+      } : {}),
       next_expires_at: d.reset_credits.next_expires_at ?? null,
     } : null,
     // Next subscription billing date, set by hand on usage-api; null if unset.
@@ -212,7 +218,7 @@ export async function callTool(name: string, rawArgs: unknown, ctx: ToolContext)
         accounts: accounts(ctx, provider),
         paused_on_proxy: paused === null ? null : paused.filter(a => !provider || a.provider === provider),
         other_providers: provider ? [] : others,
-        notes: "reset_credits.available is a read-only count; no tool can use a reset. Codex and some Claude accounts have a 5-hour window as well as the weekly one; five_hour is null for accounts without one (or with no open session). Codex accounts can also report a 24-hour window (one_day; usually null); weekly is null if an account reports no weekly limit. pace_slack > 0 means under an even pace for that window. renewal is the next subscription billing date (America/Chicago calendar date) entered by hand, or null if unset. paused_on_proxy is null when the proxy list is unavailable.",
+        notes: "reset_credits.available is a read-only count; no tool can use a reset. For Claude, weekly_available resets clear the account-wide weekly limit, fable_available ones only the Fable weekly limit, and other_available counts grants of an unrecognized kind. Codex and some Claude accounts have a 5-hour window as well as the weekly one; five_hour is null for accounts without one (or with no open session). Codex accounts can also report a 24-hour window (one_day; usually null); weekly is null if an account reports no weekly limit. pace_slack > 0 means under an even pace for that window. renewal is the next subscription billing date (America/Chicago calendar date) entered by hand, or null if unset. paused_on_proxy is null when the proxy list is unavailable.",
       });
     }
     if (name === "get_usage") {

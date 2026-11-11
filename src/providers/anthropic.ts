@@ -32,16 +32,40 @@ export interface ClaudeWindow {
   resets_at: string | null;
 }
 
-// Same shape as Codex reset_credits so clients render both identically.
+/**
+ * Which limit a Claude reset grant clears, from the grant's own `clears` list:
+ * - "weekly": clears `seven_day`, the account-wide weekly window (it also clears the Fable one).
+ * - "fable": clears only `seven_day_overage_included`, the Fable weekly window. Checked live on
+ *   2026-11-11: that window's percent_used matches the weekly_scoped "Fable" limit per account.
+ * - "other": anything else. Clients show it with the weekly count, and it is logged, so a new kind
+ *   of grant is visible instead of quietly miscounted.
+ * Anthropic's own `type` field is not used: it reads "full" on the Fable-only grants.
+ */
+export type ClaudeResetCreditType = "weekly" | "fable" | "other";
+
+// Same shape as Codex reset_credits (plus the type fields) so clients render both identically.
 export interface ClaudeResetCredit {
   status: string | null;
   granted_at: string | null;
   expires_at: string | null;
   label: string | null;
+  type: ClaudeResetCreditType;
+  /** Upstream grant id (e.g. "launch-2610-fable"); null when absent. */
+  grant_id: string | null;
+  /** The limit windows the grant clears, as Anthropic lists them. */
+  clears: string[];
+  /** Anthropic's usable_now; false when another limit blocks it (e.g. a Fable reset while the weekly limit is spent). */
+  usable_now: boolean | null;
 }
 
 export interface ClaudeResetCredits {
   available_count: number;
+  /** Available credits that clear the account-wide weekly limit. */
+  weekly_available: number;
+  /** Available credits that clear only the Fable weekly limit. */
+  fable_available: number;
+  /** Available credits of an unrecognized kind; see ClaudeResetCreditType. */
+  other_available: number;
   next_expires_at: string | null;
   credits: ClaudeResetCredit[];
 }
@@ -105,34 +129,67 @@ export function hasWeeklyWindow(json: RawUsageResponse): boolean {
   return "seven_day" in json || (json.limits ?? []).some((l) => l?.kind === "weekly_all");
 }
 
+export interface RawResetGrant {
+  id?: string;
+  label?: string;
+  type?: string;
+  clears?: unknown;
+  resets_left?: number;
+  starts_at?: string;
+  ends_at?: string;
+  paused?: boolean;
+  usable_now?: boolean;
+}
+
 export interface RawResetGrants {
   eligible?: boolean;
-  grants?: Array<{
-    label?: string;
-    resets_left?: number;
-    starts_at?: string;
-    ends_at?: string;
-    paused?: boolean;
-  }>;
+  grants?: RawResetGrant[];
 }
+
+export function classifyClaudeGrant(grant: RawResetGrant): ClaudeResetCreditType {
+  const clears = Array.isArray(grant.clears) ? grant.clears : [];
+  if (clears.includes("seven_day")) return "weekly";
+  if (clears.includes("seven_day_overage_included")) return "fable";
+  return "other";
+}
+
+// One warning per unrecognized grant, not one per poll.
+const warnedGrants = new Set<string>();
 
 export function parseClaudeResetCredits(json: RawResetGrants | null | undefined): ClaudeResetCredits | null {
   if (!json || !json.eligible) return null;
   const credits: ClaudeResetCredit[] = [];
   for (const g of json.grants ?? []) {
     const left = Math.max(0, g.resets_left ?? 0);
+    const type = classifyClaudeGrant(g);
+    const clears = Array.isArray(g.clears) ? g.clears.filter((c): c is string => typeof c === "string") : [];
+    if (type === "other" && left > 0) {
+      const key = `${g.id ?? ""}|${g.label ?? ""}|${clears.join(",")}`;
+      if (!warnedGrants.has(key)) {
+        warnedGrants.add(key);
+        console.warn(`[claude] reset grant of unknown kind (shown with weekly): id=${g.id ?? "?"} label=${JSON.stringify(g.label ?? null)} clears=${JSON.stringify(g.clears ?? null)} type=${g.type ?? "?"}`);
+      }
+    }
     for (let i = 0; i < left; i++) {
       credits.push({
         status: g.paused ? "paused" : "available",
         granted_at: g.starts_at ?? null,
         expires_at: g.ends_at ?? null,
         label: g.label ?? null,
+        type,
+        grant_id: g.id ?? null,
+        clears,
+        usable_now: typeof g.usable_now === "boolean" ? g.usable_now : null,
       });
     }
   }
   const available = credits.filter((c) => c.status === "available");
+  const count = (type: ClaudeResetCreditType) => available.filter((c) => c.type === type).length;
   return {
     available_count: available.length,
+    weekly_available: count("weekly"),
+    fable_available: count("fable"),
+    other_available: count("other"),
     next_expires_at: available.map((c) => c.expires_at).filter((e): e is string => !!e).sort()[0] ?? null,
     credits,
   };

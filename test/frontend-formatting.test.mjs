@@ -218,7 +218,7 @@ test("Codex card omits unavailable 5-hour metrics and explains the reporting gap
 });
 
 function loadRenderCodex() {
-  const names = ["fmtPct", "fmtTime", "fmtRel", "barClass", "bar", "metricRow", "renderResetCredits", "renderCodex"];
+  const names = ["fmtPct", "fmtTime", "fmtRel", "barClass", "bar", "metricRow", "resetCreditCounts", "renderResetCredits", "renderCodex"];
   const src = names.map((name) => {
     const fn = html.match(new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`));
     assert.ok(fn, `${name} should exist in public/index.html`);
@@ -227,8 +227,8 @@ function loadRenderCodex() {
   const esc = html.match(/function escapeHtml\(s\) \{.*\}/)[0];
   const sandbox = { Date, Number, Math, String, isNaN };
   vm.createContext(sandbox);
-  vm.runInContext(`${esc}\n${src}; globalThis.renderCodex = renderCodex;`, sandbox);
-  return sandbox.renderCodex;
+  vm.runInContext(`${esc}\n${src}; globalThis.renderCodex = renderCodex; globalThis.renderResetCredits = renderResetCredits;`, sandbox);
+  return Object.assign(sandbox.renderCodex, { renderResetCredits: sandbox.renderResetCredits });
 }
 
 test("Codex card shows a 24-hour window as its own row, never as the 5-hour one", () => {
@@ -373,4 +373,14 @@ test("data age tooltip names the passive/active source", () => {
   const tip = h.dataAgeTooltip({ fetchedAt: "2025-12-31T23:50:00Z", dataSource: "passive", staleness: "fresh", observedAt: "2025-12-31T23:50:00Z" });
   assert.match(tip, /^Data 10m ago: seen in CPA request headers \(passive\)/);
   assert.match(tip, /Last seen in traffic/);
+});
+
+test("reset credits read per limit when Claude splits them, and as one count otherwise", () => {
+  const { renderResetCredits } = loadRenderCodex();
+  const split = renderResetCredits({ available_count: 3, weekly_available: 1, fable_available: 2, other_available: 0, next_expires_at: null });
+  assert.match(split, /↻ 1 weekly reset · 2 Fable resets available/);
+  assert.doesNotMatch(split, /other/);
+  assert.match(renderResetCredits({ available_count: 1, weekly_available: 0, fable_available: 0, other_available: 1 }), /↻ 1 other reset available/);
+  assert.match(renderResetCredits({ available_count: 2, next_expires_at: null }), /↻ 2 full resets available/);
+  assert.equal(renderResetCredits({ available_count: 0, weekly_available: 0, fable_available: 0, other_available: 0 }), "");
 });
