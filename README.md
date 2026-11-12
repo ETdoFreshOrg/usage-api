@@ -51,9 +51,9 @@ Returns per-provider:
 - `ageSec` — seconds since `fetchedAt`
 - `staleness` — `fresh` (< 5 min), `little_stale` (< 1 h), or `stale`; tune
   with `STALE_LITTLE_SECONDS` / `STALE_SECONDS`. Claude/Codex accounts use
-  10 min / 1 h instead (`ACCOUNT_STALE_LITTLE_SECONDS` /
-  `ACCOUNT_STALE_SECONDS`): their data is normally under 5 min old, so
-  `little_stale` means checks are being missed (429 backoff, errors).
+  3 min / 30 min instead (`ACCOUNT_STALE_LITTLE_SECONDS` /
+  `ACCOUNT_STALE_SECONDS`): their data is normally about a minute old, so
+  `little_stale` means checks are being missed or slowed (429 backoff, errors).
   Clients should use this rather than their own age rules.
 - `error` — null when the latest poll succeeded
 - `intervalSec` — current polling interval (self-tunes)
@@ -148,22 +148,22 @@ Per-account counts in `recent_requests` come from CPA Manager's
 
 ## Adaptive polling
 
-Active Claude and Codex connections are discovered in the configured source every 30 seconds.
+Active Claude and Codex connections are discovered in the configured source every 15 seconds.
 Existing primary/secondary environment mappings retain `claude`, `claude2`,
 `codex`, and `codex2`; further accounts receive `claude3`, `codex3`, etc.
 Numbers are persisted in `usage-accounts.json` beside the history file, so
 account order changes do not mix usage history. Removed/disabled connections
 stop polling and disappear. Each snapshot includes `account.id`, `account.name`,
 `account.family`, and `account.priority` (CLIProxyAPI's routing priority, re-read
-every 30 s; `null` when unset or when accounts come from 9router); clients can use
+every 15 s; `null` when unset or when accounts come from 9router); clients can use
 the ID to persist visibility preferences.
 The website supports all account cards and history series automatically.
 
-### Claude/Codex accounts: passive first, active as backup
+### Claude/Codex accounts: about a minute old
 
 CLIProxyAPI keeps the rate-limit headers from each account's latest real
 request (`quota.signals` / `quota.observed_at` in `/v0/management/auth-files`),
-which usage-api already reads every 30 s for account discovery. Anthropic's
+which usage-api already reads every 15 s for account discovery. Anthropic's
 `anthropic-ratelimit-unified-{7d,5h}-*` and OpenAI's `x-codex-{primary,secondary}-*`
 headers carry the account's current weekly (and 5-hour) usage, so these
 numbers are used whenever they are newer than the last active check
@@ -180,27 +180,48 @@ has hit its weekly limit) carry no `5h` fields; the last active check's
 passive and last active value is shown.
 
 Headers do not carry Fable/Design windows, Spark, Claude plan labels or reset
-credits; those come from the active check (`/api/oauth/usage`,
-`/backend-api/wham/usage`), which also covers idle accounts:
+credits, and only exist while an account is used through CPA. The active check
+covers both: one upstream GET per check through CPA's `api-call`
+(Claude `GET https://api.anthropic.com/api/oauth/usage?cedar_ember=1`, which
+also returns reset grants; Codex `GET https://chatgpt.com/backend-api/wham/usage`).
+Extra calls are rare: the Claude plan label (`/api/oauth/profile`) every 12 h,
+and Codex reset-credit detail (`/wham/rate-limit-reset-credits`) only when the
+summary count changes or every 3 h (`CODEX_RESET_CREDITS_SECONDS`).
 
-- every 5 min (`ACCOUNT_IDLE_SECONDS`), counted from the newer of the last
-  check and the last passive observation: an idle account is re-checked every
-  5 min (catching use outside CPA), and one in use through CPA is not, because
-  its headers keep it seconds old. So shown data is at most about 5 min old.
-- every 15 min (`ACCOUNT_BUSY_SECONDS`) at most, even while headers keep
+- every 60 s (`ACCOUNT_IDLE_SECONDS`, or per provider
+  `ACCOUNT_IDLE_SECONDS_CLAUDE` / `ACCOUNT_IDLE_SECONDS_CODEX`), counted from
+  the newer of the last check and the passive data shown: an idle account is
+  re-checked every minute (catching use outside CPA), and one in use through
+  CPA is not, because its headers keep it seconds old. So shown data is about
+  a minute old either way.
+- every 5 min (`ACCOUNT_BUSY_SECONDS`) at most, even while headers keep
   arriving, for the fields headers lack (Fable/Design, Spark, reset credits).
-  `intervalSec` reports 15 min while passive data is < 5 min old
-  (`ACCOUNT_PASSIVE_FRESH_SECONDS`), else 5 min.
+  `intervalSec` reports that while passive data is < 2 min old
+  (`ACCOUNT_PASSIVE_FRESH_SECONDS`), else the idle interval.
 - once, 90 s after any known window reset (`ACCOUNT_AFTER_RESET_SECONDS`),
   except Claude's 5-hour window: it rolls several times a day and a reset only
   means no session is open, so it is shown as `null` without a check
-- on 429: 15 min doubling up to 6 h (`ACCOUNT_429_BASE_SECONDS` /
-  `ACCOUNT_429_MAX_SECONDS`), never sooner than `Retry-After`, and the normal
-  cadence only resumes after a success; other errors back off from 2 min
+- checks from all accounts are at least 5 s apart (`ACCOUNT_SPACING_SECONDS`),
+  so 8 accounts spread across the minute instead of bursting; each cadence counts
+  from when its check really started, so they stay spread
+- on 429: that account's cadence doubles (60 s → 2 → 4 → 8 min, at most 15 min,
+  `ACCOUNT_429_MAX_INTERVAL_SECONDS`) and its next check waits that long,
+  doubling for consecutive 429s up to 1 h (`ACCOUNT_429_MAX_SECONDS`), never
+  sooner than `Retry-After`. Each 30 min without a 429
+  (`ACCOUNT_429_RELAX_SECONDS`) halves the cadence again, back to 60 s, so an
+  account settles at the fastest pace its provider accepts. `rateLimitLevel`
+  (0 = normal pace) and `lastRateLimitedAt` show this per account.
+- other errors: retried after 60 s doubling to 15 min
+  (`ACCOUNT_ERROR_BASE_SECONDS` / `ACCOUNT_ERROR_MAX_SECONDS`); the first success
+  restores the normal cadence
 - on restart, an account whose saved data is recent waits for its normal
   cadence instead of being re-checked immediately; first checks are staggered
-- Codex reset-credit detail is re-read only when the summary count changes or
-  every 3 h (`CODEX_RESET_CREDITS_SECONDS`); the Claude plan label every 12 h
+
+Upstream rate limits seen so far: Anthropic's `/api/oauth/usage` returned 429s
+(e.g. `Retry-After: 252`) in Oct–Nov 2026 when accounts were polled every
+1–4 min. They were per account (one account got 429 while others got 200 from
+the same host at the same moment). Codex `/wham/usage` was polled every 60–90 s
+(2 calls per check) without 429s.
 
 Z.ai, OpenRouter, OpenAI and Jev each run an independent `Poller`:
 

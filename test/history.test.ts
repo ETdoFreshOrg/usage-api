@@ -138,3 +138,24 @@ test("HistoryStore load keeps good records when a line is corrupt", async () => 
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test("HistoryStore skips unchanged samples inside unchangedEveryMs but keeps changes and a periodic sample", () => {
+  const store = new HistoryStore({ retentionMs: 8 * 24 * 60 * 60 * 1000 });
+  const at = (min: number) => new Date(Date.parse("2026-01-02T00:00:00.000Z") + min * 60_000);
+  const sample = (used: number, expected: number) => ({ seven_day: { utilization: used, expected_percent: expected, resets_at: "2026-01-05T00:00:00.000Z" } });
+  const opts = { unchangedEveryMs: 5 * 60_000 };
+  store.recordProvider("claude", sample(10, 20), at(0), opts);
+  // Same value; only the clock-driven expected value moved: skipped.
+  store.recordProvider("claude", sample(10, 21), at(1), opts);
+  store.recordProvider("claude", sample(11, 22), at(2), opts);
+  store.recordProvider("claude", sample(11, 23), at(3), opts);
+  store.recordProvider("claude", sample(11, 24), at(7), opts);
+  // Without the option every sample is kept.
+  store.recordProvider("zai", sample(1, 1), at(0));
+  store.recordProvider("zai", sample(1, 1), at(1));
+
+  const fine = store.toSeries("fine");
+  const points = (provider: string) => fine.series.find((s) => s.provider === provider)!.points.map((p) => p.t);
+  assert.deepEqual(points("claude"), [at(0), at(2), at(7)].map((d) => d.toISOString()));
+  assert.equal(points("zai").length, 2);
+});

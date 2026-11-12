@@ -105,6 +105,7 @@ export function extractUsageMetrics(data: unknown): UsageMetric[] {
 
 export class HistoryStore {
   private records: HistoryRecord[] = [];
+  private lastSample = new Map<string, { key: string; at: number }>();
   private loaded = false;
   private appendQueue: Promise<void> = Promise.resolve();
   readonly retentionMs: number;
@@ -159,9 +160,19 @@ export class HistoryStore {
     await this.appendQueue;
   }
 
-  recordProvider(provider: string, data: unknown, at = new Date()) {
+  /**
+   * Append one sample. With `unchangedEveryMs`, a sample whose values and reset times match the
+   * provider's previous one is skipped until that long has passed (expected/pace values move with
+   * the clock and are not compared), so frequent checks of an unchanged account don't grow the file.
+   */
+  recordProvider(provider: string, data: unknown, at = new Date(), options: { unchangedEveryMs?: number } = {}) {
     const metrics = extractUsageMetrics(data);
     if (metrics.length === 0) return;
+    const key = JSON.stringify(metrics.map((m) => [m.metric, m.value, m.resetIso ?? null]));
+    const previous = this.lastSample.get(provider);
+    if (options.unchangedEveryMs && previous && previous.key === key
+      && at.getTime() - previous.at < options.unchangedEveryMs) return;
+    this.lastSample.set(provider, { key, at: at.getTime() });
     const record: HistoryRecord = { ts: at.toISOString(), provider, metrics };
     this.records.push(record);
     this.prune(at.getTime());

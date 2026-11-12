@@ -1,18 +1,34 @@
 /**
- * Claude/Codex account poller. The main source of numbers is passive: the
- * rate-limit headers CLIProxyAPI saw on the account's latest real request
- * (see passive.ts), refreshed every account sync at no upstream cost. The
- * active usage-endpoint check fills the gaps:
+ * Claude/Codex account poller. Two sources feed each account:
+ *   - passive: the rate-limit headers CLIProxyAPI saw on the account's latest real
+ *     request (see passive.ts), read from CPA's account listing every 15 s at no
+ *     upstream cost;
+ *   - active: a usage-endpoint check (one upstream GET per check through CPA's
+ *     api-call; see providers/cliproxy.ts).
+ *
+ * Active checks aim to keep shown data about a minute old:
  *   - an idle account (no new passive headers) is checked every
- *     ACCOUNT_IDLE_SECONDS (5 min), counted from whichever is newer: the last
- *     check or the last passive observation, so shown data is never much older
- *     than that and catches usage outside CPA (claude.ai, direct CLI logins);
- *   - an account in use through CPA, whose headers keep its weekly/5-hour
- *     numbers seconds old, is still checked every ACCOUNT_BUSY_SECONDS (15 min)
- *     for the fields headers lack (Fable/Design, Spark, reset credits);
+ *     ACCOUNT_IDLE_SECONDS (60 s; per provider with ACCOUNT_IDLE_SECONDS_CLAUDE /
+ *     _CODEX), counted from whichever is newer: the last check or the passive
+ *     data being shown. Idle checks also catch use outside CPA (claude.ai, direct
+ *     CLI logins);
+ *   - an account in use through CPA, whose headers keep its weekly/5-hour numbers
+ *     seconds old, is still checked every ACCOUNT_BUSY_SECONDS (5 min) for the
+ *     fields headers lack (Fable/Design, Spark, reset credits);
  *   - runs once just after a known window reset;
- *   - backs off on 429 (15 min doubling to 6 h, never below Retry-After) and
- *     only returns to the normal cadence after a success.
+ *   - checks from all accounts are spaced at least ACCOUNT_SPACING_SECONDS (5 s)
+ *     apart (UpstreamSpacer), so the accounts spread across the minute instead of
+ *     bursting, and stay spread because each cadence counts from its real start.
+ *
+ * Backoff:
+ *   - 429: the account's own cadence doubles (60 s -> 2 min -> 4 min ..., at most
+ *     ACCOUNT_429_MAX_INTERVAL_SECONDS, 15 min) and the next check waits that long,
+ *     doubling again for consecutive 429s up to ACCOUNT_429_MAX_SECONDS (1 h), and
+ *     never sooner than Retry-After. After ACCOUNT_429_RELAX_SECONDS (30 min) of
+ *     clean checks the cadence halves again, back down to the normal 60 s, so each
+ *     account settles on the fastest pace its provider tolerates.
+ *   - other errors: retry after ACCOUNT_ERROR_BASE_SECONDS (60 s) doubling, at most
+ *     ACCOUNT_ERROR_MAX_SECONDS (15 min); the first success restores the normal pace.
  */
 import { RateLimitError, Staleness } from "./cache.js";
 import { describesAccountLimits, mergePassive, PassiveObservation } from "./passive.js";
@@ -21,21 +37,50 @@ const envSec = (name: string, fallback: number) => {
   const n = Number(process.env[name]);
   return Number.isFinite(n) && n > 0 ? n : fallback;
 };
+const IDLE_SEC = envSec("ACCOUNT_IDLE_SECONDS", 60);
 export const ACCOUNT_TIMING = {
-  busySec: envSec("ACCOUNT_BUSY_SECONDS", 15 * 60),
-  idleSec: envSec("ACCOUNT_IDLE_SECONDS", 5 * 60),
-  /** Passive data younger than this means the account is in use through CPA. */
-  passiveFreshSec: envSec("ACCOUNT_PASSIVE_FRESH_SECONDS", 5 * 60),
+  /** Normal check interval per provider family; other families use the plain default. */
+  idleSec: { default: IDLE_SEC, claude: envSec("ACCOUNT_IDLE_SECONDS_CLAUDE", IDLE_SEC),
+    codex: envSec("ACCOUNT_IDLE_SECONDS_CODEX", IDLE_SEC) } as Record<string, number>,
+  busySec: envSec("ACCOUNT_BUSY_SECONDS", 5 * 60),
+  /** Passive data younger than this means the account is in use through CPA (reported in intervalSec). */
+  passiveFreshSec: envSec("ACCOUNT_PASSIVE_FRESH_SECONDS", 2 * 60),
   /** Delay after a known reset before checking, so the provider has rolled the window. */
   afterResetSec: envSec("ACCOUNT_AFTER_RESET_SECONDS", 90),
-  rateLimitBaseSec: envSec("ACCOUNT_429_BASE_SECONDS", 900),
-  rateLimitMaxSec: envSec("ACCOUNT_429_MAX_SECONDS", 6 * 3600),
-  errorBaseSec: envSec("ACCOUNT_ERROR_BASE_SECONDS", 120),
-  // Shown data is at most ~idleSec old when checks succeed, so twice that means checks are
-  // missing (429 backoff, errors); an hour means the numbers can no longer be trusted.
-  littleStaleSec: envSec("ACCOUNT_STALE_LITTLE_SECONDS", 10 * 60),
-  staleSec: envSec("ACCOUNT_STALE_SECONDS", 3600),
+  /** Minimum gap between any two accounts' upstream checks. */
+  spacingSec: envSec("ACCOUNT_SPACING_SECONDS", 5),
+  rateLimitMaxIntervalSec: envSec("ACCOUNT_429_MAX_INTERVAL_SECONDS", 15 * 60),
+  rateLimitMaxSec: envSec("ACCOUNT_429_MAX_SECONDS", 3600),
+  rateLimitRelaxSec: envSec("ACCOUNT_429_RELAX_SECONDS", 30 * 60),
+  errorBaseSec: envSec("ACCOUNT_ERROR_BASE_SECONDS", 60),
+  errorMaxSec: envSec("ACCOUNT_ERROR_MAX_SECONDS", 15 * 60),
+  // Shown data is about a minute old when checks succeed, so 3 min means checks are being
+  // missed or slowed (429 backoff, errors); 30 min means the numbers can no longer be trusted.
+  littleStaleSec: envSec("ACCOUNT_STALE_LITTLE_SECONDS", 3 * 60),
+  staleSec: envSec("ACCOUNT_STALE_SECONDS", 30 * 60),
 };
+
+export const idleSecFor = (family: string) => ACCOUNT_TIMING.idleSec[family] ?? ACCOUNT_TIMING.idleSec.default;
+
+/**
+ * Shared across accounts: each wait() resolves at least gapMs after the previous caller's
+ * start, so checks that fall due together go out one at a time.
+ */
+export class UpstreamSpacer {
+  private nextFree = 0;
+  constructor(
+    private readonly gapMs = ACCOUNT_TIMING.spacingSec * 1000,
+    private readonly now: () => number = Date.now,
+    private readonly sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)),
+  ) {}
+
+  async wait(): Promise<void> {
+    const start = Math.max(this.now(), this.nextFree);
+    this.nextFree = start + this.gapMs;
+    const delay = start - this.now();
+    if (delay > 0) await this.sleep(delay);
+  }
+}
 
 export interface AccountSnapshot {
   data: unknown;
@@ -51,8 +96,13 @@ export interface AccountSnapshot {
   ageSec: number | null;
   staleness: Staleness;
   error: string | null;
+  /** Current normal check interval: idle/busy cadence, raised while recovering from 429s. */
   intervalSec: number;
   nextFetchAt: string;
+  /** 429-driven slowdown: the idle cadence is multiplied by 2^this (0 = normal pace). */
+  rateLimitLevel: number;
+  /** Time of the latest 429 from the provider, if any since start. */
+  lastRateLimitedAt: string | null;
 }
 
 export interface AccountPollerHooks {
@@ -60,6 +110,8 @@ export interface AccountPollerHooks {
   onActive?: (data: unknown, at: Date) => void;
   /** Each new passive observation that changed the shown data (merged data). */
   onPassive?: (data: unknown, at: Date) => void;
+  /** Shared spacing between accounts' upstream checks; awaited before each check starts. */
+  spacer?: UpstreamSpacer;
 }
 
 export function accountStaleness(fetchedAt: string | null, now = Date.now()): Staleness {
@@ -84,8 +136,15 @@ function resetTimes(data: any, family: string): number[] {
 export class AccountPoller {
   private timer: NodeJS.Timeout | null = null;
   private stopped = true;
+  /** Set by stop() (unlike `stopped`, which also covers "not started yet", e.g. a direct tick()). */
+  private halted = false;
   private running = false;
+  /** Consecutive 429s since the last success. */
   private rateLimited = 0;
+  /** Slowdown level from 429s; decays one step per rateLimitRelaxSec of clean checks. */
+  private rateLimitLevel = 0;
+  private lastRateLimitAt = 0;
+  private relaxedAt = 0;
   private failures = 0;
   private nextAt = new Date();
   private backoffUntil = 0;
@@ -113,6 +172,7 @@ export class AccountPoller {
   /** First check: due when the seeded data would have been re-checked anyway, else after `initialDelaySec`. */
   start(initialDelaySec = 0) {
     this.stopped = false;
+    this.halted = false;
     const seeded = this.activeFetchedAt ? Date.parse(this.activeFetchedAt) : NaN;
     const due = Number.isFinite(seeded) ? seeded + this.baseIntervalSec() * 1000 : 0;
     this.schedule(Math.max(this.now() + initialDelaySec * 1000, due));
@@ -120,6 +180,7 @@ export class AccountPoller {
 
   stop() {
     this.stopped = true;
+    this.halted = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
   }
@@ -148,8 +209,19 @@ export class AccountPoller {
     return Number.isFinite(at) && this.now() - at < ACCOUNT_TIMING.passiveFreshSec * 1000;
   }
 
+  /** Idle cadence for this account: its provider's interval, slowed by any 429 level. */
+  private idleIntervalSec() {
+    const base = idleSecFor(this.family);
+    if (this.rateLimitLevel === 0) return base;
+    return Math.max(base, Math.min(ACCOUNT_TIMING.rateLimitMaxIntervalSec, base * 2 ** this.rateLimitLevel));
+  }
+
+  private busyIntervalSec() {
+    return Math.max(ACCOUNT_TIMING.busySec, this.idleIntervalSec());
+  }
+
   private baseIntervalSec() {
-    return this.passiveFresh() ? ACCOUNT_TIMING.busySec : ACCOUNT_TIMING.idleSec;
+    return this.passiveFresh() ? this.busyIntervalSec() : this.idleIntervalSec();
   }
 
   private shown(): { data: unknown; at: string | null; source: "passive" | "active" | null } {
@@ -159,20 +231,20 @@ export class AccountPoller {
   }
 
   /**
-   * Next active check: idleSec after the newer of the last attempt and the passive data being
-   * shown (so an account in use is not re-checked while its headers keep arriving), but no later
-   * than busySec after the last attempt; just after a known reset if sooner.
+   * Next active check: the idle interval after the newer of the last attempt and the passive data
+   * being shown (so an account in use is not re-checked while its headers keep arriving), but no
+   * later than the busy interval after the last attempt; just after a known reset if sooner.
    */
   private dueAt(): number {
     if (this.backoffUntil > this.now()) return this.backoffUntil;
     const last = this.lastAttemptAt ? Date.parse(this.lastAttemptAt) : NaN;
     if (!Number.isFinite(last)) return this.nextAt.getTime();
-    let due = last + ACCOUNT_TIMING.idleSec * 1000;
+    const idleMs = this.idleIntervalSec() * 1000;
+    let due = last + idleMs;
     const shown = this.shown();
     const shownAt = shown.source === "passive" && shown.at ? Date.parse(shown.at) : NaN;
     if (Number.isFinite(shownAt))
-      due = Math.min(last + Math.max(ACCOUNT_TIMING.busySec, ACCOUNT_TIMING.idleSec) * 1000,
-        Math.max(due, shownAt + ACCOUNT_TIMING.idleSec * 1000));
+      due = Math.min(last + this.busyIntervalSec() * 1000, Math.max(due, shownAt + idleMs));
     for (const reset of resetTimes(shown.data, this.family))
       if (reset > last) due = Math.min(due, reset + ACCOUNT_TIMING.afterResetSec * 1000);
     return Math.max(due, this.now());
@@ -187,6 +259,11 @@ export class AccountPoller {
 
   async tick() {
     this.running = true;
+    // Wait for this account's turn first, and count the cadence from when the check really
+    // starts, so accounts that queued behind each other stay spread out afterwards.
+    await this.hooks.spacer?.wait();
+    // stop() while waiting (account removed): skip the check.
+    if (this.halted) { this.running = false; return; }
     this.lastAttemptAt = new Date(this.now()).toISOString();
     try {
       const data = await this.fetcher();
@@ -198,23 +275,32 @@ export class AccountPoller {
       this.failures = 0;
       this.backoffUntil = 0;
       this.lastShownKey = "";
+      // Step the 429 slowdown back down after a clean stretch, one level at a time.
+      if (this.rateLimitLevel > 0
+        && this.now() - Math.max(this.lastRateLimitAt, this.relaxedAt) >= ACCOUNT_TIMING.rateLimitRelaxSec * 1000) {
+        this.rateLimitLevel--;
+        this.relaxedAt = this.now();
+        console.log(`[${this.name}] no 429 for ${ACCOUNT_TIMING.rateLimitRelaxSec}s; check interval now ${this.idleIntervalSec()}s`);
+      }
       this.hooks.onActive?.(data, at);
     } catch (err) {
       if (err instanceof RateLimitError) {
         this.rateLimited++;
-        // Never sooner than Retry-After, and never straight back to the normal pace.
-        const backoff = Math.min(ACCOUNT_TIMING.rateLimitMaxSec,
-          ACCOUNT_TIMING.rateLimitBaseSec * 2 ** (this.rateLimited - 1));
+        this.lastRateLimitAt = this.now();
+        if (this.idleIntervalSec() < ACCOUNT_TIMING.rateLimitMaxIntervalSec) this.rateLimitLevel++;
+        // Wait at least the new (slower) interval, doubling for consecutive 429s, never sooner
+        // than Retry-After.
+        const backoff = Math.min(ACCOUNT_TIMING.rateLimitMaxSec, this.idleIntervalSec() * 2 ** (this.rateLimited - 1));
         const delay = Math.max(backoff, err.retryAfterSec + 1);
         this.backoffUntil = this.now() + delay * 1000;
         this.error = `rate-limited (retry in ${Math.round(delay)}s)`;
-        console.warn(`[${this.name}] ${this.error}`);
+        console.warn(`[${this.name}] ${this.error}; Retry-After ${err.retryAfterSec || "none"}; check interval now ${this.idleIntervalSec()}s`);
       } else {
         this.failures++;
-        const delay = Math.min(this.baseIntervalSec(), ACCOUNT_TIMING.errorBaseSec * 2 ** (this.failures - 1));
+        const delay = Math.min(ACCOUNT_TIMING.errorMaxSec, ACCOUNT_TIMING.errorBaseSec * 2 ** (this.failures - 1));
         this.backoffUntil = this.now() + delay * 1000;
         this.error = err instanceof Error ? err.message : String(err);
-        console.error(`[${this.name}] fetch failed:`, this.error);
+        console.error(`[${this.name}] fetch failed (retry in ${Math.round(delay)}s):`, this.error);
       }
     } finally {
       this.running = false;
@@ -237,6 +323,8 @@ export class AccountPoller {
       error: this.error,
       intervalSec: this.baseIntervalSec(),
       nextFetchAt: this.nextAt.toISOString(),
+      rateLimitLevel: this.rateLimitLevel,
+      lastRateLimitedAt: this.lastRateLimitAt ? new Date(this.lastRateLimitAt).toISOString() : null,
     };
   }
 }

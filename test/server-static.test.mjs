@@ -7,13 +7,13 @@ const server = readFileSync(new URL("../src/server.ts", import.meta.url), "utf8"
 test("history records enriched provider data so expected_percent is persisted", () => {
   assert.match(server, /function enrichProviderData\(provider: string, data: unknown\)/);
   assert.match(server, /const enriched = enrichProviderData\(provider, data\)/);
-  assert.match(server, /history\.recordProvider\(provider, enriched, fetchedAt\)/);
+  assert.match(server, /history\.recordProvider\(provider, enriched, fetchedAt, options\)/);
 });
 
 test("Codex history omits deprecated aliases to avoid duplicate series", () => {
   assert.match(server, /primary: _primary, secondary: _secondary/);
   assert.match(server, /primary: _p, secondary: _s/);
-  assert.match(server, /history\.recordProvider\(provider, codexData, fetchedAt\)/);
+  assert.match(server, /history\.recordProvider\(provider, codexData, fetchedAt, options\)/);
 });
 
 test("optional second Codex account uses an isolated poller and provider key", () => {
@@ -26,4 +26,5 @@ test("optional second Codex account uses an isolated poller and provider key", (
 
 test("pacing constants exist before the first account sync can record passive history", () => {
   assert.ok(server.indexOf("const SEVEN_DAY_MS") < server.indexOf("await syncAccounts();"));
+  assert.ok(server.indexOf("const ACCOUNT_HISTORY_UNCHANGED_MS") < server.indexOf("await syncAccounts();"));
 });

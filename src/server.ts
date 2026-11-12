@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import { Poller } from "./cache.js";
-import { AccountPoller } from "./account-poller.js";
+import { AccountPoller, UpstreamSpacer } from "./account-poller.js";
 import { HistoryGranularity, HistoryStore } from "./history.js";
 import { assignAccounts } from "./accounts.js";
 import { CliProxyClient } from "./providers/cliproxy.js";
@@ -90,10 +90,15 @@ function remember<T>(provider: string): (data: T, fetchedAt: Date) => void {
   };
 }
 
+// Claude/Codex accounts are checked about once a minute; unchanged samples are kept only every
+// 5 min so the (unpruned) history file grows at roughly its old rate.
+const ACCOUNT_HISTORY_UNCHANGED_MS = 5 * 60_000;
+
 function recordHistory(provider: string, data: unknown, fetchedAt: Date) {
   const enriched = enrichProviderData(provider, data);
+  const options = /^(claude|codex)\d*$/.test(provider) ? { unchangedEveryMs: ACCOUNT_HISTORY_UNCHANGED_MS } : {};
   if (!/^codex\d*$/.test(provider) || !enriched || typeof enriched !== "object") {
-    history.recordProvider(provider, enriched, fetchedAt);
+    history.recordProvider(provider, enriched, fetchedAt, options);
     return;
   }
   // Codex retains primary/secondary as compatibility aliases in /api/usage.
@@ -104,7 +109,7 @@ function recordHistory(provider: string, data: unknown, fetchedAt: Date) {
     const { primary: _p, secondary: _s, ...rest } = a;
     return rest;
   });
-  history.recordProvider(provider, codexData, fetchedAt);
+  history.recordProvider(provider, codexData, fetchedAt, options);
 }
 
 // Accept the workspace .env's existing names as fallbacks.
@@ -153,6 +158,8 @@ let assignments: Record<string, string> = {};
 try { assignments = JSON.parse(await fs.readFile(ACCOUNTS_FILE, "utf8")); }
 catch (err: any) { if (err?.code !== "ENOENT") throw err; }
 const accountPollers = new Map<string, { connectionId: string; name: string; family: string; priority: number | null; poller: AccountPoller }>();
+// One spacer for every account: all checks leave through the same CPA host, so keep them apart.
+const upstreamSpacer = new UpstreamSpacer();
 async function syncAccounts() {
   const connections = cliProxy ? await cliProxy.listAccounts() : listConnections();
   const next = assignAccounts(connections, assignments, {
@@ -177,10 +184,10 @@ async function syncAccounts() {
       continue;
     }
     const family = connection.provider;
-    // Passive CPA headers are the main source; this active check is the slow backup (see account-poller.ts).
+    // Active usage-endpoint checks about once a minute, plus passive CPA headers (see account-poller.ts).
     const poller = new AccountPoller(key, family,
       () => cliProxy ? cliProxy.fetchUsage(id) : family === "claude" ? fetchClaudeUsage(id) : fetchCodexUsage(id),
-      { onActive: remember(key), onPassive: (data, at) => recordHistory(key, data, at) });
+      { onActive: remember(key), onPassive: (data, at) => recordHistory(key, data, at), spacer: upstreamSpacer });
     const last = lastGood[key];
     if (last) poller.seed(last.data, last.fetchedAt);
     poller.observe(observation);
@@ -193,7 +200,14 @@ async function syncAccounts() {
   }
 }
 await syncAccounts();
-setInterval(() => { void syncAccounts().catch(err => console.warn("account discovery failed:", err.message)); }, 30_000);
+// CPA's account listing is a local call and carries the passive headers, so read it often.
+// A slow listing (25 s timeout) must not overlap the next one, which could start duplicate pollers.
+let syncing = false;
+setInterval(() => {
+  if (syncing) return;
+  syncing = true;
+  void syncAccounts().catch(err => console.warn("account discovery failed:", err.message)).finally(() => { syncing = false; });
+}, 15_000);
 const zai = ZAI_KEY ? new Poller("zai", () => fetchZaiUsage(ZAI_KEY), remember("zai")) : null;
 const openrouter = OPENROUTER_KEY ? new Poller("openrouter", () => fetchOpenRouterUsage(OPENROUTER_KEY, OPENROUTER_MANAGEMENT_KEY), remember("openrouter")) : null;
 const openai = OPENAI_KEY ? new Poller("openai", () => fetchOpenAiUsage(OPENAI_KEY), remember("openai")) : null;
