@@ -52,7 +52,7 @@ Returns per-provider:
 - `staleness` — `fresh` (< 5 min), `little_stale` (< 1 h), or `stale`; tune
   with `STALE_LITTLE_SECONDS` / `STALE_SECONDS`. Claude/Codex accounts use
   3 min / 30 min instead (`ACCOUNT_STALE_LITTLE_SECONDS` /
-  `ACCOUNT_STALE_SECONDS`): their data is normally about a minute old, so
+  `ACCOUNT_STALE_SECONDS`): their data is normally at most 1–2 min old, so
   `little_stale` means checks are being missed or slowed (429 backoff, errors).
   Clients should use this rather than their own age rules.
 - `error` — null when the latest poll succeeded
@@ -188,12 +188,13 @@ Extra calls are rare: the Claude plan label (`/api/oauth/profile`) every 12 h,
 and Codex reset-credit detail (`/wham/rate-limit-reset-credits`) only when the
 summary count changes or every 3 h (`CODEX_RESET_CREDITS_SECONDS`).
 
-- every 60 s (`ACCOUNT_IDLE_SECONDS`, or per provider
-  `ACCOUNT_IDLE_SECONDS_CLAUDE` / `ACCOUNT_IDLE_SECONDS_CODEX`), counted from
-  the newer of the last check and the passive data shown: an idle account is
-  re-checked every minute (catching use outside CPA), and one in use through
-  CPA is not, because its headers keep it seconds old. So shown data is about
-  a minute old either way.
+- Codex every 60 s, Claude every 120 s (`ACCOUNT_IDLE_SECONDS_CODEX` /
+  `ACCOUNT_IDLE_SECONDS_CLAUDE`; `ACCOUNT_IDLE_SECONDS` sets the 60 s base),
+  counted from the newer of the last check and the passive data shown: an idle
+  account is re-checked on that cadence (catching use outside CPA), and one in
+  use through CPA is not, because its headers keep it seconds old. So shown
+  data is at most 1 min (Codex) / 2 min (Claude) old. Claude is slower because
+  Anthropic 429s some accounts at 60 s (see below).
 - every 5 min (`ACCOUNT_BUSY_SECONDS`) at most, even while headers keep
   arriving, for the fields headers lack (Fable/Design, Spark, reset credits).
   `intervalSec` reports that while passive data is < 2 min old
@@ -204,12 +205,12 @@ summary count changes or every 3 h (`CODEX_RESET_CREDITS_SECONDS`).
 - checks from all accounts are at least 5 s apart (`ACCOUNT_SPACING_SECONDS`),
   so 8 accounts spread across the minute instead of bursting; each cadence counts
   from when its check really started, so they stay spread
-- on 429: that account's cadence doubles (60 s → 2 → 4 → 8 min, at most 15 min,
-  `ACCOUNT_429_MAX_INTERVAL_SECONDS`) and its next check waits that long,
-  doubling for consecutive 429s up to 1 h (`ACCOUNT_429_MAX_SECONDS`), never
-  sooner than `Retry-After`. Each 30 min without a 429
-  (`ACCOUNT_429_RELAX_SECONDS`) halves the cadence again, back to 60 s, so an
-  account settles at the fastest pace its provider accepts. `rateLimitLevel`
+- on 429: that account's cadence doubles (e.g. Claude 2 → 4 → 8 min, at most
+  15 min, `ACCOUNT_429_MAX_INTERVAL_SECONDS`) and its next check waits that
+  long, doubling for consecutive 429s up to 1 h (`ACCOUNT_429_MAX_SECONDS`),
+  never sooner than `Retry-After`. Each hour without a 429
+  (`ACCOUNT_429_RELAX_SECONDS`) halves the cadence again, back to the provider's
+  normal pace, so an account settles at the fastest pace its provider accepts. `rateLimitLevel`
   (0 = normal pace) and `lastRateLimitedAt` show this per account.
 - other errors: retried after 60 s doubling to 15 min
   (`ACCOUNT_ERROR_BASE_SECONDS` / `ACCOUNT_ERROR_MAX_SECONDS`); the first success
@@ -219,9 +220,11 @@ summary count changes or every 3 h (`CODEX_RESET_CREDITS_SECONDS`).
 
 Upstream rate limits seen so far: Anthropic's `/api/oauth/usage` returned 429s
 (e.g. `Retry-After: 252`) in Oct–Nov 2026 when accounts were polled every
-1–4 min. They were per account (one account got 429 while others got 200 from
-the same host at the same moment). Codex `/wham/usage` was polled every 60–90 s
-(2 calls per check) without 429s.
+1–4 min, and on 2026-11-12 two of five accounts (claude3, claude4) got 429s
+(no `Retry-After`) after ~12 checks at 60 s, while 5-min checks had run clean.
+The limits are per account: one account got 429 while others got 200 from the
+same host at the same moment, and other accounts ran clean at 60 s. Codex
+`/wham/usage` has run at 60–90 s without 429s.
 
 Z.ai, OpenRouter, OpenAI and Jev each run an independent `Poller`:
 

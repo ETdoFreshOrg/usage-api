@@ -8,10 +8,12 @@
  *
  * Active checks aim to keep shown data about a minute old:
  *   - an idle account (no new passive headers) is checked every
- *     ACCOUNT_IDLE_SECONDS (60 s; per provider with ACCOUNT_IDLE_SECONDS_CLAUDE /
- *     _CODEX), counted from whichever is newer: the last check or the passive
- *     data being shown. Idle checks also catch use outside CPA (claude.ai, direct
- *     CLI logins);
+ *     ACCOUNT_IDLE_SECONDS_CODEX (60 s) / ACCOUNT_IDLE_SECONDS_CLAUDE (120 s),
+ *     counted from whichever is newer: the last check or the passive data being
+ *     shown. Idle checks also catch use outside CPA (claude.ai, direct CLI logins).
+ *     Claude is slower because Anthropic's /api/oauth/usage 429s some accounts at
+ *     60 s: on 2026-11-12 claude3 and claude4 were rate-limited after ~12 checks
+ *     at 60 s, while 5-min checks had run clean;
  *   - an account in use through CPA, whose headers keep its weekly/5-hour numbers
  *     seconds old, is still checked every ACCOUNT_BUSY_SECONDS (5 min) for the
  *     fields headers lack (Fable/Design, Spark, reset credits);
@@ -21,12 +23,12 @@
  *     bursting, and stay spread because each cadence counts from its real start.
  *
  * Backoff:
- *   - 429: the account's own cadence doubles (60 s -> 2 min -> 4 min ..., at most
+ *   - 429: the account's own cadence doubles (e.g. 2 min -> 4 min -> 8 min, at most
  *     ACCOUNT_429_MAX_INTERVAL_SECONDS, 15 min) and the next check waits that long,
  *     doubling again for consecutive 429s up to ACCOUNT_429_MAX_SECONDS (1 h), and
- *     never sooner than Retry-After. After ACCOUNT_429_RELAX_SECONDS (30 min) of
- *     clean checks the cadence halves again, back down to the normal 60 s, so each
- *     account settles on the fastest pace its provider tolerates.
+ *     never sooner than Retry-After. After ACCOUNT_429_RELAX_SECONDS (1 h) of clean
+ *     checks the cadence halves again, back down to its provider's normal pace, so
+ *     each account settles on the fastest pace its provider tolerates.
  *   - other errors: retry after ACCOUNT_ERROR_BASE_SECONDS (60 s) doubling, at most
  *     ACCOUNT_ERROR_MAX_SECONDS (15 min); the first success restores the normal pace.
  */
@@ -40,7 +42,7 @@ const envSec = (name: string, fallback: number) => {
 const IDLE_SEC = envSec("ACCOUNT_IDLE_SECONDS", 60);
 export const ACCOUNT_TIMING = {
   /** Normal check interval per provider family; other families use the plain default. */
-  idleSec: { default: IDLE_SEC, claude: envSec("ACCOUNT_IDLE_SECONDS_CLAUDE", IDLE_SEC),
+  idleSec: { default: IDLE_SEC, claude: envSec("ACCOUNT_IDLE_SECONDS_CLAUDE", Math.max(IDLE_SEC, 120)),
     codex: envSec("ACCOUNT_IDLE_SECONDS_CODEX", IDLE_SEC) } as Record<string, number>,
   busySec: envSec("ACCOUNT_BUSY_SECONDS", 5 * 60),
   /** Passive data younger than this means the account is in use through CPA (reported in intervalSec). */
@@ -51,10 +53,10 @@ export const ACCOUNT_TIMING = {
   spacingSec: envSec("ACCOUNT_SPACING_SECONDS", 5),
   rateLimitMaxIntervalSec: envSec("ACCOUNT_429_MAX_INTERVAL_SECONDS", 15 * 60),
   rateLimitMaxSec: envSec("ACCOUNT_429_MAX_SECONDS", 3600),
-  rateLimitRelaxSec: envSec("ACCOUNT_429_RELAX_SECONDS", 30 * 60),
+  rateLimitRelaxSec: envSec("ACCOUNT_429_RELAX_SECONDS", 3600),
   errorBaseSec: envSec("ACCOUNT_ERROR_BASE_SECONDS", 60),
   errorMaxSec: envSec("ACCOUNT_ERROR_MAX_SECONDS", 15 * 60),
-  // Shown data is about a minute old when checks succeed, so 3 min means checks are being
+  // Shown data is at most 1-2 min old when checks succeed, so 3 min means checks are being
   // missed or slowed (429 backoff, errors); 30 min means the numbers can no longer be trusted.
   littleStaleSec: envSec("ACCOUNT_STALE_LITTLE_SECONDS", 3 * 60),
   staleSec: envSec("ACCOUNT_STALE_SECONDS", 30 * 60),

@@ -4,6 +4,9 @@ import { ACCOUNT_TIMING, AccountPoller, accountStaleness, UpstreamSpacer } from 
 import { RateLimitError } from "../src/cache.js";
 
 const T0 = Date.parse("2026-11-03T12:00:00Z");
+// Shipped per-provider cadences; the tests below run Claude accounts at 60 s like Codex.
+const SHIPPED_IDLE = { ...ACCOUNT_TIMING.idleSec };
+ACCOUNT_TIMING.idleSec.claude = 60;
 const iso = (ms: number) => new Date(ms).toISOString();
 
 function make(results: Array<unknown | Error>, family = "claude", spacer?: UpstreamSpacer, clock?: { now: number }) {
@@ -54,6 +57,11 @@ test("an account that stops being used is re-checked 60 s after its last headers
   p.poller.observe(obs(T0 + 3 * 60_000, 0.3, resetFar));
   assert.equal(p.next() - T0, 4 * 60_000);
   p.poller.stop();
+});
+
+test("shipped cadence: Codex every 60 s, Claude every 120 s (Anthropic 429s some accounts at 60 s)", () => {
+  assert.equal(SHIPPED_IDLE.codex, 60);
+  assert.equal(SHIPPED_IDLE.claude, 120);
 });
 
 test("per-provider idle intervals apply to their own family only", async () => {
@@ -129,28 +137,28 @@ test("429 doubles the account's cadence, honors a longer Retry-After, and holds 
   assert.equal(p.next() - T0, 7_201_000);
   await p.poller.tick();
   assert.equal(p.poller.snapshot().error, null);
-  // The 429s leave the account at 8 min until it has gone 30 min without one.
+  // The 429s leave the account at 8 min until it has gone an hour without one.
   assert.equal(p.next() - T0, 480_000);
   assert.equal(p.poller.snapshot().intervalSec, 480);
   p.poller.stop();
 });
 
-test("after 429s the cadence steps back down to 60 s, one halving per clean 30 min", async () => {
+test("after 429s the cadence steps back down to 60 s, one halving per clean hour", async () => {
   const ok = () => week(1, T0 + 5 * 86_400_000);
   const p = make([new RateLimitError(0), new RateLimitError(0), ok(), ok(), ok(), ok(), ok()]);
   await p.poller.tick();
   await p.poller.tick();
   assert.equal(p.poller.snapshot().rateLimitLevel, 2);
-  p.set(T0 + 10 * 60_000);
-  await p.poller.tick();
-  assert.equal(p.next() - p.calls[2], 240_000, "too soon to relax");
   p.set(T0 + 30 * 60_000);
   await p.poller.tick();
-  assert.equal(p.next() - p.calls[3], 120_000);
-  p.set(T0 + 45 * 60_000);
-  await p.poller.tick();
-  assert.equal(p.next() - p.calls[4], 120_000, "each step needs its own clean 30 min");
+  assert.equal(p.next() - p.calls[2], 240_000, "too soon to relax");
   p.set(T0 + 60 * 60_000);
+  await p.poller.tick();
+  assert.equal(p.next() - p.calls[3], 120_000);
+  p.set(T0 + 90 * 60_000);
+  await p.poller.tick();
+  assert.equal(p.next() - p.calls[4], 120_000, "each step needs its own clean hour");
+  p.set(T0 + 120 * 60_000);
   await p.poller.tick();
   assert.equal(p.next() - p.calls[5], 60_000);
   assert.equal(p.poller.snapshot().rateLimitLevel, 0);
