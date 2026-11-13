@@ -119,6 +119,49 @@ dates for claude, claude3, claude4, codex, codex2 and codex3 are added only for
 keys absent from the file. A `DELETE` stores `null`, so seeding never
 restores a cleared date. The MCP stays read-only and cannot change these dates.
 
+## Subscription end dates (expiry)
+
+When an account will end instead of renewing, `/api/usage` account entries and
+the MCP's `list_accounts` / `get_usage` carry:
+
+```json
+"expiry": { "expires_at": "2026-12-09", "days_until_expiry": 26, "source": "provider", "ends_at": "2026-12-09T06:15:18.000Z" }
+```
+
+`expiry` is `null` while the plan renews. The dashboard card then shows
+"⚠ expires in 26d (Dec 9, 2026)" in place of the renewal line: amber, red in
+the last 7 days and once passed ("expired 3d ago").
+
+Where the date comes from:
+
+- **Codex: from ChatGPT.** usage-api calls
+  `chatgpt.com/backend-api/accounts/check/v4-2023-04-27` through CPA (at most
+  every 6 h per account; `CODEX_SUBSCRIPTION_SECONDS`) and keeps the result as
+  `data.subscription` (`status`, `will_renew`, `renews_at`, `expires_at`,
+  `cancels_at`, `billing_period`). If `will_renew` is false, `cancels_at` is set,
+  or the plan is no longer active, `expiry` is `cancels_at`, else `expires_at`,
+  as an `America/Chicago` calendar date.
+- **Claude: entered by hand.** Anthropic's `/api/oauth/profile` reports only
+  `organization.subscription_status` (kept as `data.subscription.status`): no
+  end date and no will-renew flag. A cancelled plan stays "active" until it
+  ends. Enter the date manually (below). A status other than `active` with no
+  date shows "⚠ subscription <status>" on the card.
+
+A provider end date wins over a manual one. Manual dates live in
+`usage-expiries.json` beside the history file (override with
+`USAGE_EXPIRIES_FILE`) and work like renewal dates, including hand edits:
+
+```bash
+curl -X PUT https://usage.etdofresh.com/api/expiries/claude3 \
+  -H "Authorization: Bearer $USAGE_MCP_OWNER_KEY" -H "Content-Type: application/json" \
+  -d '{"expires_at":"2026-11-27"}'
+curl -X DELETE https://usage.etdofresh.com/api/expiries/claude3 -H "Authorization: Bearer $USAGE_MCP_OWNER_KEY"
+curl https://usage.etdofresh.com/api/expiries      # public, read-only
+```
+
+The 9router fallback path (no `CLIPROXYAPI_MANAGEMENT_KEY`) does not read
+subscription state, so only manual dates apply there.
+
 ## MCP (read-only, owner-only)
 
 `https://usage.etdofresh.com/mcp` is a stateless Streamable HTTP MCP server for

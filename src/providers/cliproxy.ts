@@ -1,7 +1,7 @@
 import { RateLimitError, throwIfRateLimited } from "../cache.js";
 import { PassiveObservation, readObservation } from "../passive.js";
-import { parseClaudeUsage, parseClaudeResetCredits, planLabel, hasWeeklyWindow } from "./anthropic.js";
-import { parseCodexUsage, parseResetCredits } from "./codex.js";
+import { parseClaudeUsage, parseClaudeResetCredits, planLabel, hasWeeklyWindow, claudeSubscription, ClaudeSubscription } from "./anthropic.js";
+import { parseCodexUsage, parseResetCredits, parseCodexSubscription, CodexSubscription, ACCOUNTS_CHECK_URL } from "./codex.js";
 
 export interface ProxyAccount {
   id: string;
@@ -57,12 +57,16 @@ function accountId(value: unknown): string | null {
 // The plan tier almost never changes; re-reading it costs an extra upstream call per check.
 const PROFILE_TTL_MS = 12 * 3_600_000;
 const RESET_DETAIL_TTL_MS = Number(process.env.CODEX_RESET_CREDITS_SECONDS ?? 3 * 3600) * 1000;
+// Whether a Codex plan renews changes rarely (a cancel, a resubscribe); check a few times a day.
+const SUBSCRIPTION_TTL_MS = Number(process.env.CODEX_SUBSCRIPTION_SECONDS ?? 6 * 3600) * 1000;
 
 export class CliProxyClient {
   private accounts: ProxyAccount[] = [];
   /** Claude/Codex accounts on the proxy, enabled or not, from the last listing (identity and status only, no tokens). */
   proxyAccounts: ProxyAccountStatus[] | null = null;
-  private profiles = new Map<string, { at: number; label: string | null }>();
+  private profiles = new Map<string, { at: number; label: string | null; subscription: ClaudeSubscription }>();
+  /** Codex subscription state (renews or ends) per account; best effort, kept on a failed re-check. */
+  private subscriptions = new Map<string, { at: number; subscription: CodexSubscription | null }>();
   /** Codex reset-credit detail per account; re-read only when the summary count changes or it ages out. */
   private resetDetails = new Map<string, { at: number; count: number; resets: ReturnType<typeof parseResetCredits> }>();
   constructor(private readonly baseUrl: string, private readonly key: string,
@@ -139,11 +143,12 @@ export class CliProxyClient {
       if (!profile || Date.now() - profile.at > PROFILE_TTL_MS) {
         try {
           const rawProfile = await this.providerGet(account, "https://api.anthropic.com/api/oauth/profile", headers);
-          profile = { at: Date.now(), label: planLabel(rawProfile) };
+          profile = { at: Date.now(), label: planLabel(rawProfile), subscription: claudeSubscription(rawProfile, new Date().toISOString()) };
           this.profiles.set(id, profile);
         } catch { /* Keep a known plan if the optional profile request fails. */ }
       }
       return { ...parseClaudeUsage(raw, profile?.label ?? null, parseClaudeResetCredits(raw.cedar_ember)),
+        subscription: profile?.subscription ?? null,
         connection_id: id, source: "cliproxyapi", checked_at: checkedAt,
         reset_credits_checked_at: raw.cedar_ember ? checkedAt : null };
     }
@@ -171,7 +176,16 @@ export class CliProxyClient {
         if (typeof count === "number") this.resetDetails.set(id, { at: Date.now(), count, resets });
       } catch (err) { resetError = err instanceof Error ? err.message : "Reset-credit lookup failed"; }
     }
-    return { ...parseCodexUsage(raw), reset_credits: resets, source: "cliproxyapi", checked_at: checkedAt,
+    let sub = this.subscriptions.get(id);
+    if (!sub || Date.now() - sub.at > SUBSCRIPTION_TTL_MS) {
+      try {
+        const body = await this.providerGet(account, ACCOUNTS_CHECK_URL, headers);
+        sub = { at: Date.now(), subscription: parseCodexSubscription(body, account.accountId, new Date().toISOString()) };
+        this.subscriptions.set(id, sub);
+      } catch { /* Optional; keep the last known state. */ }
+    }
+    return { ...parseCodexUsage(raw), reset_credits: resets, subscription: sub?.subscription ?? null,
+      source: "cliproxyapi", checked_at: checkedAt,
       reset_credits_checked_at: resetCheckedAt, reset_credits_error: resetError };
   }
 }

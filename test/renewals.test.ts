@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import express from "express";
-import { RenewalStore, installRenewals, nextRenewal, parseSetting, todayIn } from "../src/renewals.js";
+import { RenewalStore, ExpiryStore, installRenewals, nextRenewal, parseSetting, parseExpirySetting, providerExpiry, todayIn } from "../src/renewals.js";
 
 test("future and same-day dates are kept; days_until_renewal counts calendar days", () => {
   assert.deepEqual(nextRenewal({ renews_at: "2026-11-10", billing_cycle: "monthly" }, "2026-11-03"),
@@ -102,4 +102,60 @@ test("REST edits are off without an owner key", async () => {
     assert.equal((await put(s.base, "claude3", { renews_at: "2099-01-27" }, "anything")).status, 503);
     assert.equal((await fetch(`${s.base}/api/renewals`)).status, 200);
   } finally { await s.close(); }
+});
+
+test("provider expiry: only a plan that will not renew, as a Chicago calendar date", () => {
+  const now = Date.parse("2026-11-13T18:00:00Z");
+  // 06:15 UTC on Dec 9 is 00:15 on Dec 9 in Chicago.
+  assert.deepEqual(providerExpiry({ status: "active", will_renew: false, expires_at: "2026-12-09T06:15:18.000Z" }, "America/Chicago", now),
+    { expires_at: "2026-12-09", days_until_expiry: 26, source: "provider", ends_at: "2026-12-09T06:15:18.000Z" });
+  assert.equal(providerExpiry({ status: "active", will_renew: true, expires_at: "2026-12-09T06:15:18Z" }, "America/Chicago", now), null);
+  assert.equal(providerExpiry({ status: "active", will_renew: null, expires_at: null }, "America/Chicago", now), null);
+  assert.equal(providerExpiry(null), null);
+  // cancels_at wins over expires_at; an inactive plan reads as expired.
+  assert.equal(providerExpiry({ status: "active", will_renew: true, cancels_at: "2026-11-20T12:00:00Z", expires_at: "2026-12-09T06:15:18Z" }, "America/Chicago", now)!.expires_at, "2026-11-20");
+  assert.equal(providerExpiry({ status: "inactive", will_renew: false, expires_at: "2026-11-10T12:00:00Z" }, "America/Chicago", now)!.days_until_expiry, -3);
+  // Claude only reports a status; nothing to date.
+  assert.equal(providerExpiry({ status: "active", will_renew: null, expires_at: null, cancels_at: null }, "America/Chicago", now), null);
+});
+
+test("manual expiry is the fallback; a provider end date wins", async () => {
+  const store = new ExpiryStore(null);
+  const now = Date.parse("2026-11-13T18:00:00Z");
+  assert.equal(store.get("claude3", now), null);
+  await store.set("claude3", { expires_at: "2026-11-27" });
+  assert.deepEqual(store.get("claude3", now), { expires_at: "2026-11-27", days_until_expiry: 14, source: "manual", ends_at: null });
+  assert.deepEqual(store.resolve("claude3", { status: "active", will_renew: null, expires_at: null }, now), store.get("claude3", now));
+  await store.set("codex2", { expires_at: "2026-12-31" });
+  assert.equal(store.resolve("codex2", { status: "active", will_renew: false, expires_at: "2026-12-09T06:15:18Z" }, now)!.source, "provider");
+  assert.equal(parseExpirySetting({ expires_at: "2026-02-30" }), "expires_at must be a YYYY-MM-DD date");
+  assert.deepEqual(parseExpirySetting({ expires_at: "2026-12-01", extra: 1 }), { expires_at: "2026-12-01" });
+});
+
+test("manual expiry dates are kept in their own file and edited over REST with the owner key", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "expiries-"));
+  const file = path.join(dir, "usage-expiries.json");
+  const app = express();
+  const expiries = new ExpiryStore(file);
+  await expiries.load();
+  installRenewals(app, new RenewalStore(null), "owner-fixture", expiries);
+  const server = await new Promise<any>(r => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const send = (method: string, account: string, body?: unknown, key = "owner-fixture") => fetch(`${base}/api/expiries/${account}`, {
+    method, headers: { "content-type": "application/json", authorization: `Bearer ${key}` }, body: body === undefined ? undefined : JSON.stringify(body) });
+  try {
+    assert.equal((await send("PUT", "claude3", { expires_at: "2099-01-27" }, "wrong")).status, 401);
+    assert.equal((await send("PUT", "claude3", { expires_at: "soon" })).status, 400);
+    assert.equal((await send("PUT", "zai", { expires_at: "2099-01-27" })).status, 400);
+    const put = await send("PUT", "claude3", { expires_at: "2099-01-27" });
+    assert.equal(put.status, 200);
+    assert.equal((await put.json()).expiry.expires_at, "2099-01-27");
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")), { claude3: { expires_at: "2099-01-27" } });
+    assert.equal((await (await fetch(`${base}/api/expiries`)).json()).expiries.claude3.source, "manual");
+    assert.equal((await send("DELETE", "claude3")).status, 200);
+    assert.equal(expiries.get("claude3"), null);
+  } finally {
+    server.closeAllConnections(); await new Promise(r => server.close(r));
+    await rm(dir, { recursive: true, force: true });
+  }
 });

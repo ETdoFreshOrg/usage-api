@@ -10,7 +10,7 @@ import { assignAccounts } from "./accounts.js";
 import { CliProxyClient } from "./providers/cliproxy.js";
 import { RecentRequests, AccountActivityReader } from "./recent.js";
 import { installMcp } from "./mcp.js";
-import { RenewalStore, SEED_RENEWALS, installRenewals } from "./renewals.js";
+import { RenewalStore, ExpiryStore, SEED_RENEWALS, installRenewals } from "./renewals.js";
 import { OAuthStore } from "../oauth/oauth-store.mjs";
 
 // Load env from the shared volume (same .env that ai-sessions uses) so secrets
@@ -152,6 +152,10 @@ if (!cliProxy) try {
 const RENEWALS_FILE = process.env.USAGE_RENEWALS_FILE ?? path.join(path.dirname(HISTORY_FILE), "usage-renewals.json");
 const renewals = new RenewalStore(RENEWALS_FILE, process.env.RENEWAL_TIME_ZONE?.trim() || undefined);
 await renewals.load(SEED_RENEWALS);
+// Manual subscription end dates (Claude reports none); a Codex end date comes from ChatGPT.
+const EXPIRIES_FILE = process.env.USAGE_EXPIRIES_FILE ?? path.join(path.dirname(HISTORY_FILE), "usage-expiries.json");
+const expiries = new ExpiryStore(EXPIRIES_FILE, process.env.RENEWAL_TIME_ZONE?.trim() || undefined);
+await expiries.load();
 
 const ACCOUNTS_FILE = path.join(path.dirname(HISTORY_FILE), "usage-accounts.json");
 let assignments: Record<string, string> = {};
@@ -345,6 +349,7 @@ function currentProviders(): Record<string, any> {
       ...snapshot, data: enrichProviderData(key, snapshot.data),
       account: { id: account.connectionId, name: account.name, family: account.family, priority: account.priority },
       renewal: renewals.get(key),
+      expiry: expiries.resolve(key, (snapshot.data as any)?.subscription),
       source: cliProxy ? "cliproxyapi" : "9router",
     };
   }
@@ -371,7 +376,7 @@ app.get("/api/history", (req, res) => {
 });
 
 const OWNER_KEY = process.env.USAGE_MCP_OWNER_KEY?.trim() || undefined;
-installRenewals(app, renewals, OWNER_KEY);
+installRenewals(app, renewals, OWNER_KEY, expiries);
 
 // Read-only MCP at /mcp (owner-key OAuth). Off unless USAGE_MCP_OWNER_KEY is set.
 const mcpEnabled = installMcp(app, {

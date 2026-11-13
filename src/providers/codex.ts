@@ -200,3 +200,47 @@ export function createCodexUsageFetcher(
 }
 
 export const fetchCodexUsage = createCodexUsageFetcher();
+
+// --- Subscription state ------------------------------------------------------
+// GET chatgpt.com/backend-api/accounts/check/v4-2023-04-27 (the call the
+// ChatGPT web app makes) reports the plan's end and whether it renews:
+//   entitlement: has_active_subscription, expires_at, renews_at, cancels_at, billing_period
+//   last_active_subscription: will_renew (false once cancelled), cancellation_outcome
+// Checked live 2026-11-13: a cancelled account read will_renew false,
+// cancellation_outcome "deactivate", cancels_at null, expires_at = end of the paid month.
+export const ACCOUNTS_CHECK_URL = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27";
+
+export interface CodexSubscription {
+  source: "chatgpt";
+  status: "active" | "inactive" | null;
+  will_renew: boolean | null;
+  renews_at: string | null;
+  /** End of the paid period (ISO). */
+  expires_at: string | null;
+  cancels_at: string | null;
+  billing_period: string | null;
+  checked_at: string;
+}
+
+const str = (v: unknown) => typeof v === "string" && v ? v : null;
+const iso = (v: unknown) => { const s = str(v); const t = s ? Date.parse(s) : NaN; return Number.isFinite(t) ? new Date(t).toISOString() : null; };
+
+/** Picks the workspace matching `accountId` (else the only/first one). null when the body has no account. */
+export function parseCodexSubscription(json: any, accountId: string | null, checkedAt: string): CodexSubscription | null {
+  const accounts = json?.accounts;
+  if (!accounts || typeof accounts !== "object") return null;
+  const entry = (accountId && accounts[accountId]) || accounts.default || Object.values(accounts)[0];
+  if (!entry || typeof entry !== "object") return null;
+  const e = (entry as any).entitlement ?? {};
+  const last = (entry as any).last_active_subscription ?? {};
+  return {
+    source: "chatgpt",
+    status: typeof e.has_active_subscription === "boolean" ? (e.has_active_subscription ? "active" : "inactive") : null,
+    will_renew: typeof last.will_renew === "boolean" ? last.will_renew : null,
+    renews_at: iso(e.renews_at),
+    expires_at: iso(e.expires_at),
+    cancels_at: iso(e.cancels_at),
+    billing_period: str(e.billing_period),
+    checked_at: checkedAt,
+  };
+}

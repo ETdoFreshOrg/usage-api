@@ -68,16 +68,17 @@ export function parseSetting(body: any): RenewalSetting | string {
   return { renews_at: body.renews_at, billing_cycle: cycle };
 }
 
-export class RenewalStore {
+/** Per-account settings in a JSON file beside the history file; hand edits are picked up on the next read. */
+class SettingsStore<S> {
   // null = deliberately cleared; kept so seeding never brings it back.
-  private entries: Record<string, RenewalSetting | null> = {};
+  protected entries: Record<string, S | null> = {};
   private mtimeMs = -1;
   private write: Promise<void> = Promise.resolve();
 
-  constructor(private filePath: string | null, private timeZone = DEFAULT_TIME_ZONE) {}
+  constructor(private filePath: string | null, protected timeZone: string, private parse: (body: any) => S | string) {}
 
   /** Load the file and add seeds for keys it has never held. */
-  async load(seeds: Record<string, RenewalSetting> = {}) {
+  async load(seeds: Record<string, S> = {}) {
     this.reload(true);
     const missing = Object.keys(seeds).filter(k => !(k in this.entries));
     if (!missing.length) return;
@@ -85,7 +86,7 @@ export class RenewalStore {
     await this.save();
   }
 
-  private reload(force = false) {
+  protected reload(force = false) {
     if (!this.filePath) return;
     let mtimeMs: number;
     try { mtimeMs = statSync(this.filePath).mtimeMs; }
@@ -93,10 +94,10 @@ export class RenewalStore {
     if (!force && mtimeMs === this.mtimeMs) return;
     try {
       const raw = JSON.parse(readFileSync(this.filePath, "utf8"));
-      const next: Record<string, RenewalSetting | null> = {};
+      const next: Record<string, S | null> = {};
       for (const [key, value] of Object.entries(raw ?? {})) {
         if (value === null) { next[key] = null; continue; }
-        const parsed = parseSetting(value);
+        const parsed = this.parse(value);
         if (typeof parsed === "string") console.warn(`${this.filePath}: ignoring ${key}: ${parsed}`);
         else next[key] = parsed;
       }
@@ -120,22 +121,102 @@ export class RenewalStore {
     return this.write;
   }
 
-  get(key: string, now = Date.now()): Renewal | null {
+  protected setting(key: string): S | null {
     this.reload();
-    const setting = this.entries[key];
-    return setting ? nextRenewal(setting, todayIn(this.timeZone, now)) : null;
+    return this.entries[key] ?? null;
   }
 
-  all(now = Date.now()): Record<string, Renewal | null> {
+  protected keys(): string[] {
     this.reload();
-    return Object.fromEntries(Object.keys(this.entries).map(k => [k, this.get(k, now)]));
+    return Object.keys(this.entries);
   }
 
-  async set(key: string, setting: RenewalSetting | null) {
+  async set(key: string, setting: S | null) {
     this.reload();
     this.entries[key] = setting;
     await this.save();
   }
+}
+
+export class RenewalStore extends SettingsStore<RenewalSetting> {
+  constructor(filePath: string | null, timeZone = DEFAULT_TIME_ZONE) { super(filePath, timeZone, parseSetting); }
+
+  get(key: string, now = Date.now()): Renewal | null {
+    const setting = this.setting(key);
+    return setting ? nextRenewal(setting, todayIn(this.timeZone, now)) : null;
+  }
+
+  all(now = Date.now()): Record<string, Renewal | null> {
+    return Object.fromEntries(this.keys().map(k => [k, this.get(k, now)]));
+  }
+}
+
+// --- Subscription end dates ------------------------------------------------
+// ChatGPT reports when a Codex subscription is set to end (accounts/check:
+// will_renew, cancels_at, expires_at). Anthropic's OAuth profile only reports
+// subscription_status, so a Claude end date has to be entered by hand.
+
+export interface ExpirySetting { expires_at: string }
+
+/** An account's subscription end: a calendar date in RENEWAL_TIME_ZONE. */
+export interface Expiry {
+  expires_at: string;
+  /** Negative once the date has passed. */
+  days_until_expiry: number;
+  /** "provider" = reported by ChatGPT; "manual" = entered on usage-api. */
+  source: "provider" | "manual";
+  /** The provider's exact end time (ISO); null for a manual date. */
+  ends_at: string | null;
+}
+
+/** Provider subscription state as usage-api reads it (data.subscription). */
+export interface ProviderSubscription {
+  status?: string | null;
+  will_renew?: boolean | null;
+  expires_at?: string | null;
+  cancels_at?: string | null;
+}
+
+export function parseExpirySetting(body: any): ExpirySetting | string {
+  if (!body || typeof body !== "object") return "body must be a JSON object";
+  if (typeof body.expires_at !== "string" || !parseDate(body.expires_at)) return "expires_at must be a YYYY-MM-DD date";
+  return { expires_at: body.expires_at };
+}
+
+const daysBetween = (today: string, date: string) =>
+  Math.round((Date.parse(`${date}T00:00:00Z`) - Date.parse(`${today}T00:00:00Z`)) / DAY_MS);
+
+export class ExpiryStore extends SettingsStore<ExpirySetting> {
+  constructor(filePath: string | null, timeZone = DEFAULT_TIME_ZONE) { super(filePath, timeZone, parseExpirySetting); }
+
+  get(key: string, now = Date.now()): Expiry | null {
+    const setting = this.setting(key);
+    if (!setting) return null;
+    return { expires_at: setting.expires_at, days_until_expiry: daysBetween(todayIn(this.timeZone, now), setting.expires_at), source: "manual", ends_at: null };
+  }
+
+  all(now = Date.now()): Record<string, Expiry | null> {
+    return Object.fromEntries(this.keys().map(k => [k, this.get(k, now)]));
+  }
+
+  /** Provider end date when the subscription will not renew, else the manual date, else null. */
+  resolve(key: string, subscription: ProviderSubscription | null | undefined, now = Date.now()): Expiry | null {
+    return providerExpiry(subscription, this.timeZone, now) ?? this.get(key, now);
+  }
+}
+
+/**
+ * The end date a provider reports for a subscription that will not renew: cancelled, set not to
+ * renew, or no longer active. null while it renews normally or when the provider gives no date.
+ */
+export function providerExpiry(sub: ProviderSubscription | null | undefined, timeZone = DEFAULT_TIME_ZONE, now = Date.now()): Expiry | null {
+  if (!sub) return null;
+  const ending = sub.will_renew === false || !!sub.cancels_at || (sub.status != null && sub.status !== "active");
+  const end = sub.cancels_at || sub.expires_at;
+  const t = end ? Date.parse(end) : NaN;
+  if (!ending || !Number.isFinite(t)) return null;
+  const date = todayIn(timeZone, t);
+  return { expires_at: date, days_until_expiry: daysBetween(todayIn(timeZone, now), date), source: "provider", ends_at: new Date(t).toISOString() };
 }
 
 const equal = (a: string, b: string) => {
@@ -144,15 +225,15 @@ const equal = (a: string, b: string) => {
 };
 
 /**
- * GET /api/renewals is public like /api/usage. PUT/DELETE /api/renewals/:account
- * need `Authorization: Bearer <owner key>` (USAGE_MCP_OWNER_KEY); without a key
+ * GET /api/renewals and /api/expiries are public like /api/usage. PUT/DELETE
+ * /api/renewals/:account and /api/expiries/:account need `Authorization: Bearer <owner key>` (USAGE_MCP_OWNER_KEY); without a key
  * they answer 503.
  */
-export function installRenewals(app: express.Express, store: RenewalStore, ownerKey?: string) {
+export function installRenewals(app: express.Express, store: RenewalStore, ownerKey?: string, expiries?: ExpiryStore) {
   app.get("/api/renewals", (_req, res) => { res.json({ renewals: store.all() }); });
   const limiter = rateLimit({ windowMs: 60_000, limit: 30, standardHeaders: "draft-7", legacyHeaders: false });
   const guard: express.RequestHandler = (req, res, next) => {
-    if (!ownerKey) { res.status(503).json({ error: "Renewal editing is not configured (USAGE_MCP_OWNER_KEY not set)" }); return; }
+    if (!ownerKey) { res.status(503).json({ error: "Date editing is not configured (USAGE_MCP_OWNER_KEY not set)" }); return; }
     const token = /^Bearer\s+(.+)$/i.exec(req.get("authorization") ?? "")?.[1]?.trim() ?? "";
     if (!equal(token, ownerKey)) { res.status(401).json({ error: "Owner key required" }); return; }
     if (!ACCOUNT_KEY.test(req.params.account)) { res.status(400).json({ error: "account must be a Claude or Codex key such as claude3 or codex" }); return; }
@@ -167,5 +248,19 @@ export function installRenewals(app: express.Express, store: RenewalStore, owner
   app.delete("/api/renewals/:account", limiter, guard, async (req, res) => {
     await store.set(req.params.account, null);
     res.json({ account: req.params.account, renewal: null });
+  });
+  if (!expiries) return;
+  // Manual subscription end dates (mainly Claude, whose API reports none). A provider-reported
+  // end date still wins in /api/usage; these are the fallback.
+  app.get("/api/expiries", (_req, res) => { res.json({ expiries: expiries.all() }); });
+  app.put("/api/expiries/:account", limiter, guard, express.json({ limit: "4kb" }), async (req, res) => {
+    const setting = parseExpirySetting(req.body);
+    if (typeof setting === "string") { res.status(400).json({ error: setting }); return; }
+    await expiries.set(req.params.account, setting);
+    res.json({ account: req.params.account, stored: setting, expiry: expiries.get(req.params.account) });
+  });
+  app.delete("/api/expiries/:account", limiter, guard, async (req, res) => {
+    await expiries.set(req.params.account, null);
+    res.json({ account: req.params.account, expiry: null });
   });
 }

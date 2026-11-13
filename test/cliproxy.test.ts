@@ -119,7 +119,7 @@ test("Codex reset-credit detail is re-read only when the count changes, and CPA'
   const detail = ok({ available_count: 2, credits: [] });
   const { client, calls } = setup([{ files: [{ ...file("codex", "one@example.com"),
     quota: { observed_at: "2026-11-03T19:00:00Z", signals: { "X-Codex-Primary-Used-Percent": "4" } } }] },
-    usage(2), detail, usage(2), usage(3), ok({ available_count: 3, credits: [] })]);
+    usage(2), detail, ok({ accounts: {} }), usage(2), usage(3), ok({ available_count: 3, credits: [] })]);
   const [account] = await client.listAccounts();
   assert.equal(account.observation?.signals["x-codex-primary-used-percent"], "4");
   await client.fetchUsage(account.id);
@@ -129,4 +129,46 @@ test("Codex reset-credit detail is re-read only when the count changes, and CPA'
   assert.equal(changed.reset_credits.available_count, 3);
   const detailCalls = calls.filter(c => c.body?.url?.includes("rate-limit-reset-credits")).length;
   assert.equal(detailCalls, 2);
+});
+
+const accountsCheck = (willRenew: boolean, expires = "2026-12-09T06:15:18+00:00") => ok({ accounts: {
+  other: { entitlement: { has_active_subscription: true, expires_at: "2027-01-01T00:00:00+00:00" }, last_active_subscription: { will_renew: true } },
+  "ws-1": { entitlement: { has_active_subscription: true, subscription_plan: "chatgptprolite", expires_at: expires,
+    renews_at: "2026-12-09T00:15:18+00:00", cancels_at: null, billing_period: "monthly" },
+  last_active_subscription: { will_renew: willRenew, cancellation_outcome: willRenew ? null : "deactivate" } } } });
+
+test("CPA reads whether a Codex plan renews from accounts/check, for the account's own workspace, and caches it", async () => {
+  const usage = ok({ rate_limit: { primary_window: { used_percent: 5, limit_window_seconds: 604800 } }, rate_limit_reset_credits: { available_count: 0 } });
+  const { client, calls } = setup([{ files: [{ ...file("codex", "one@example.com"), id_token: { chatgpt_account_id: "ws-1" } }] },
+    usage, accountsCheck(false), usage]);
+  const [account] = await client.listAccounts();
+  const data: any = await client.fetchUsage(account.id);
+  assert.equal(calls[2].body.url, "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27");
+  assert.equal(calls[2].body.method, "GET");
+  assert.equal(calls[2].body.header["ChatGPT-Account-ID"], "ws-1");
+  assert.deepEqual({ ...data.subscription, checked_at: "x" }, { source: "chatgpt", status: "active", will_renew: false,
+    renews_at: "2026-12-09T00:15:18.000Z", expires_at: "2026-12-09T06:15:18.000Z", cancels_at: null, billing_period: "monthly", checked_at: "x" });
+  const again: any = await client.fetchUsage(account.id);
+  assert.equal(calls.length, 4, "subscription state is cached between usage checks");
+  assert.equal(again.subscription.will_renew, false);
+});
+
+test("a failed Codex accounts/check leaves usage intact with subscription null", async () => {
+  const { client } = setup([{ files: [file("codex", "one@example.com")] },
+    ok({ rate_limit: { primary_window: { used_percent: 5, limit_window_seconds: 604800 } }, rate_limit_reset_credits: { available_count: 0 } }),
+    { status_code: 403, body: "{}" }]);
+  const [account] = await client.listAccounts();
+  const data: any = await client.fetchUsage(account.id);
+  assert.equal(data.seven_day.used_percent, 5);
+  assert.equal(data.subscription, null);
+});
+
+test("CPA keeps Claude's subscription_status from the profile (Anthropic reports no end date)", async () => {
+  const { client } = setup([{ files: [file("claude", "one@example.com")] }, ok({ seven_day: { utilization: 5 } }),
+    ok({ account: { has_claude_max: true }, organization: { rate_limit_tier: "default_claude_max_20x", subscription_status: "active" } })]);
+  const [account] = await client.listAccounts();
+  const data: any = await client.fetchUsage(account.id);
+  assert.equal(data.subscription.source, "anthropic");
+  assert.equal(data.subscription.status, "active");
+  assert.equal(data.subscription.expires_at, null);
 });

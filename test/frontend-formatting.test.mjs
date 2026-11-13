@@ -210,10 +210,10 @@ test("history chart removes short zero dropouts without hiding real reset ramps"
   assert.deepEqual([...cleanedHistoryPoints(realReset).map((p) => p.value)], [95, 0, 1, 2, 3]);
 });
 
-test("Codex card omits unavailable 5-hour metrics and explains the reporting gap", () => {
+test("Codex card omits unavailable 5-hour metrics without a notice", () => {
   assert.match(html, /windowRow\("5-hour", d\.five_hour\)/);
   assert.match(html, /windowRow\("7-day", d\.seven_day\)/);
-  assert.match(html, /5-hour limit is not currently reported by Codex/);
+  assert.doesNotMatch(html, /5-hour limit is not currently reported/);
   assert.doesNotMatch(html, /metricRow\("primary", d\.primary/);
 });
 
@@ -250,7 +250,8 @@ test("Codex card shows a 24-hour window as its own row, never as the 5-hour one"
   assert.doesNotMatch(normal, /not currently reported/);
 
   const weeklyOnly = renderCodex({ data: { additional: [], five_hour: null, one_day: null, seven_day: { used_percent: 40, resets_at: resets } } });
-  assert.match(weeklyOnly, /5-hour limit is not currently reported by Codex/);
+  assert.match(weeklyOnly, /<div class="label">7-day<\/div>/);
+  assert.doesNotMatch(weeklyOnly, /5-hour/);
   assert.doesNotMatch(weeklyOnly, /no 7-day limit/);
 });
 
@@ -301,7 +302,7 @@ test("account cards show the manual renewal date", () => {
   const fn = html.match(/function fmtRenewal\(r\) \{[\s\S]*?\n\}/);
   const esc = html.match(/function escapeHtml\(s\) \{.*\}/);
   assert.ok(fn && esc, "fmtRenewal should exist in public/index.html");
-  assert.match(html, /\(family \? fmtRenewal\(snap\?\.renewal\) : ""\)/);
+  assert.match(html, /fmtExpiry\(snap\?\.expiry\) \|\| fmtRenewal\(snap\?\.renewal\)/);
   const sandbox = { Date, Number, String };
   vm.createContext(sandbox);
   vm.runInContext(`${esc[0]} ${fn[0]}; globalThis.fmtRenewal = fmtRenewal;`, sandbox);
@@ -309,6 +310,29 @@ test("account cards show the manual renewal date", () => {
   const out = sandbox.fmtRenewal({ renews_at: "2026-11-10", billing_cycle: "monthly", days_until_renewal: 7, source: "manual" });
   assert.match(out, /renews in 7d \(.*2026.*\) · monthly/);
   assert.match(sandbox.fmtRenewal({ renews_at: "2026-11-03", billing_cycle: "yearly", days_until_renewal: 0 }), /renews today/);
+});
+
+test("account cards show a subscription end as a warning in place of the renewal", () => {
+  const pick = (name) => html.match(new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`))[0];
+  const esc = html.match(/function escapeHtml\(s\) \{.*\}/)[0];
+  const attr = html.match(/function escapeAttr\(s\) \{.*\}/)[0];
+  const sandbox = { Date, Number, String };
+  vm.createContext(sandbox);
+  vm.runInContext(`${esc} ${attr} ${pick("fmtExpiry")} ${pick("fmtSubscriptionStatus")};
+    globalThis.fmtExpiry = fmtExpiry; globalThis.fmtSubscriptionStatus = fmtSubscriptionStatus;`, sandbox);
+  assert.equal(sandbox.fmtExpiry(null), "");
+  const far = sandbox.fmtExpiry({ expires_at: "2026-12-09", days_until_expiry: 26, source: "provider", ends_at: "2026-12-09T06:15:18.000Z" });
+  assert.match(far, /class="sub expiry"/);
+  assert.match(far, /expires in 26d \(.*2026.*\)/);
+  assert.match(far, /will not renew/);
+  const near = sandbox.fmtExpiry({ expires_at: "2026-11-15", days_until_expiry: 2, source: "manual", ends_at: null });
+  assert.match(near, /class="sub expiry soon"/);
+  assert.match(near, /Set manually/);
+  assert.match(sandbox.fmtExpiry({ expires_at: "2026-11-10", days_until_expiry: -3, source: "manual" }), /expired 3d ago/);
+  assert.match(sandbox.fmtExpiry({ expires_at: "2026-11-13", days_until_expiry: 0, source: "manual" }), /expires today/);
+  assert.equal(sandbox.fmtSubscriptionStatus({ status: "active" }, null), "");
+  assert.equal(sandbox.fmtSubscriptionStatus({ status: "canceled" }, { expires_at: "2026-12-01" }), "");
+  assert.match(sandbox.fmtSubscriptionStatus({ status: "past_due" }, null), /subscription past_due/);
 });
 
 test("Claude card shows a 5-hour row only when the account reports one", () => {

@@ -318,3 +318,24 @@ export async function fetchClaudeUsage(account?: string): Promise<ClaudeUsage> {
     connection_id: connection.id,
   };
 }
+
+/**
+ * Subscription state from /api/oauth/profile. Anthropic reports only
+ * organization.subscription_status ("active"; Stripe-style values otherwise):
+ * no end date and no will-renew flag, so a Claude end date is entered by hand
+ * (usage-api's /api/expiries). Checked live 2026-11-13.
+ */
+export interface ClaudeSubscription {
+  source: "anthropic";
+  status: string | null;
+  will_renew: null;
+  expires_at: null;
+  cancels_at: null;
+  checked_at: string;
+}
+
+export function claudeSubscription(profile: any, checkedAt: string): ClaudeSubscription {
+  const status = profile?.organization?.subscription_status;
+  return { source: "anthropic", status: typeof status === "string" && status ? status : null,
+    will_renew: null, expires_at: null, cancels_at: null, checked_at: checkedAt };
+}
