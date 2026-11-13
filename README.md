@@ -144,6 +144,11 @@ the MCP's `list_accounts` / `get_usage` carry:
 "⚠ expires in 26d (Dec 9, 2026)" in place of the renewal line: amber, red in
 the last 7 days and once passed ("expired 3d ago").
 
+Every Claude/Codex card says when the account ends: the expiry if it will
+not renew, else "renews in Xd (date)", else "expiry unknown" when neither the
+provider nor a manual entry gives a date. Dates entered by hand carry a small
+**MANUAL** tag; provider dates have none.
+
 Where the date comes from:
 
 - **Codex: from ChatGPT.** usage-api calls

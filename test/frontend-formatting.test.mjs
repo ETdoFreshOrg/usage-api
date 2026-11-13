@@ -303,15 +303,20 @@ test("account cards show the manual renewal date", () => {
   const esc = html.match(/function escapeHtml\(s\) \{.*\}/);
   assert.ok(fn && esc, "fmtRenewal should exist in public/index.html");
   assert.match(html, /fmtExpiry\(snap\?\.expiry\) \|\| fmtRenewal\(snap\?\.renewal\)/);
+  assert.match(html, /family\s*\? fmtTerm\(snap\)/);
   const sandbox = { Date, Number, String };
   vm.createContext(sandbox);
-  vm.runInContext(`${esc[0]} ${fn[0]}; globalThis.fmtRenewal = fmtRenewal;`, sandbox);
+  const tag = html.match(/function manualTag\(source\) \{[\s\S]*?\n\}/)[0];
+  vm.runInContext(`${esc[0]} ${tag} ${fn[0]}; globalThis.fmtRenewal = fmtRenewal;`, sandbox);
   assert.equal(sandbox.fmtRenewal(null), "");
   const out = sandbox.fmtRenewal({ renews_at: "2026-11-10", billing_cycle: "monthly", days_until_renewal: 7, source: "manual" });
   assert.match(out, /renews in 7d \(.*2026.*\) · monthly/);
   assert.match(sandbox.fmtRenewal({ renews_at: "2026-11-03", billing_cycle: "yearly", days_until_renewal: 0 }), /renews today/);
   assert.match(out, /title="Set manually/);
-  assert.match(sandbox.fmtRenewal({ renews_at: "2026-12-07", billing_cycle: "monthly", days_until_renewal: 24, source: "provider" }), /title="Reported by the provider/);
+  assert.match(out, /<span class="src-tag"[^>]*>manual<\/span><\/div>$/);
+  const fromProvider = sandbox.fmtRenewal({ renews_at: "2026-12-07", billing_cycle: "monthly", days_until_renewal: 24, source: "provider" });
+  assert.match(fromProvider, /title="Reported by the provider/);
+  assert.doesNotMatch(fromProvider, /src-tag/);
 });
 
 test("account cards show a subscription end as a warning in place of the renewal", () => {
@@ -320,8 +325,8 @@ test("account cards show a subscription end as a warning in place of the renewal
   const attr = html.match(/function escapeAttr\(s\) \{.*\}/)[0];
   const sandbox = { Date, Number, String };
   vm.createContext(sandbox);
-  vm.runInContext(`${esc} ${attr} ${pick("fmtExpiry")} ${pick("fmtSubscriptionStatus")};
-    globalThis.fmtExpiry = fmtExpiry; globalThis.fmtSubscriptionStatus = fmtSubscriptionStatus;`, sandbox);
+  vm.runInContext(`${esc} ${attr} ${pick("manualTag")} ${pick("fmtRenewal")} ${pick("fmtExpiry")} ${pick("fmtTerm")} ${pick("fmtSubscriptionStatus")};
+    globalThis.fmtExpiry = fmtExpiry; globalThis.fmtTerm = fmtTerm; globalThis.fmtSubscriptionStatus = fmtSubscriptionStatus;`, sandbox);
   assert.equal(sandbox.fmtExpiry(null), "");
   const far = sandbox.fmtExpiry({ expires_at: "2026-12-09", days_until_expiry: 26, source: "provider", ends_at: "2026-12-09T06:15:18.000Z" });
   assert.match(far, /class="sub expiry"/);
@@ -332,6 +337,14 @@ test("account cards show a subscription end as a warning in place of the renewal
   assert.match(near, /Set manually/);
   assert.match(sandbox.fmtExpiry({ expires_at: "2026-11-10", days_until_expiry: -3, source: "manual" }), /expired 3d ago/);
   assert.match(sandbox.fmtExpiry({ expires_at: "2026-11-13", days_until_expiry: 0, source: "manual" }), /expires today/);
+  assert.doesNotMatch(far, /src-tag/);
+  assert.match(near, />manual<\/span>/);
+  // Every account card says when it ends: expiry first, then renewal, else "expiry unknown".
+  const renewal = { renews_at: "2026-12-02", billing_cycle: "monthly", days_until_renewal: 19, source: "manual" };
+  assert.match(sandbox.fmtTerm({ expiry: { expires_at: "2026-12-09", days_until_expiry: 26, source: "provider" }, renewal }), /expires in 26d/);
+  assert.match(sandbox.fmtTerm({ expiry: null, renewal }), /renews in 19d.*>manual</);
+  assert.match(sandbox.fmtTerm({ expiry: null, renewal: null }), />expiry unknown</);
+  assert.match(sandbox.fmtTerm(undefined), />expiry unknown</);
   assert.equal(sandbox.fmtSubscriptionStatus({ status: "active" }, null), "");
   assert.equal(sandbox.fmtSubscriptionStatus({ status: "canceled" }, { expires_at: "2026-12-01" }), "");
   assert.match(sandbox.fmtSubscriptionStatus({ status: "past_due" }, null), /subscription past_due/);
