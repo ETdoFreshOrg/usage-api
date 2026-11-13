@@ -410,3 +410,11 @@ test("reset credits read per limit when Claude splits them, and as one count oth
   assert.match(renderResetCredits({ available_count: 2, next_expires_at: null }), /↻ 2 full resets available/);
   assert.equal(renderResetCredits({ available_count: 0, weekly_available: 0, fable_available: 0, other_available: 0 }), "");
 });
+
+test("stale cards dim their content but keep the refresh indicators at full strength", () => {
+  assert.doesNotMatch(html, /\.card\.stale-data \{ opacity/);
+  assert.match(html, /\.card\.stale-data \.title-text, \.card\.stale-data \.acct, \.card\.stale-data \.body \{ opacity: 0\.7; \}/);
+  assert.match(html, /\.card\.stale-data h2 \.stamp \{ color: var\(--warn\); \}/);
+  // The status dot sits outside the dimmed title text.
+  assert.match(html, /<span class="title-main">\$\{statusDot\(snap\)\}<span class="title-text">/);
+});

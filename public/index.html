@@ -89,6 +89,7 @@
   .provider-group:first-child { margin-top: 0; }
   .card h2 { gap: 12px; }
   .card h2 .title-main { display: flex; align-items: baseline; gap: 8px; flex: none; white-space: nowrap; }
+  .card h2 .title-text { display: inline-flex; align-items: baseline; gap: 8px; }
   .card h2 .plan { font-size: 11px; text-transform: none; letter-spacing: 0; color: #66717d; }
   .card h2 .prio { font-size: 11px; text-transform: none; letter-spacing: 0; color: #b39ddb; }
   .card h2 .stamp { cursor: help; text-align: right; }
@@ -100,7 +101,10 @@
   .avail.stale { color: #9e9e9e; }
   .avail.blocked { color: #e57373; }
   .card.blocked { border-color: rgba(229, 115, 115, 0.45); }
-  .card.stale-data { opacity: 0.7; }
+  /* Stale cards dim their content but not the refresh indicators (status dot, "fetched … ago"),
+     which stay at full strength, the stamp in amber, so they stand out against the grey. */
+  .card.stale-data .title-text, .card.stale-data .acct, .card.stale-data .body { opacity: 0.7; }
+  .card.stale-data h2 .stamp { color: var(--warn); }
   pre.json { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 11px; max-height: 200px; overflow: auto; color: var(--muted); }
   details > summary { cursor: pointer; color: var(--muted); font-size: 11px; }
 </style>
@@ -534,8 +538,8 @@ function card(name, snap) {
   }
   return `
     <section class="${cardClass}">
-      <h2><span class="title-main">${statusDot(snap)}${titleHtml}${plan ? `<span class="plan">${escapeHtml(fmtPlan(plan))}</span>` : ""}${
-        priority ? `<span class="prio" title="CLIProxyAPI routing priority">${priority}</span>` : ""}</span><span class="stamp" title="${escapeAttr(ageTip ?? "")}">${stamp}</span></h2>
+      <h2><span class="title-main">${statusDot(snap)}<span class="title-text">${titleHtml}${plan ? `<span class="plan">${escapeHtml(fmtPlan(plan))}</span>` : ""}${
+        priority ? `<span class="prio" title="CLIProxyAPI routing priority">${priority}</span>` : ""}</span></span><span class="stamp" title="${escapeAttr(ageTip ?? "")}">${stamp}</span></h2>
       ${acctLine}
       <div class="body">${body}</div>
     </section>
