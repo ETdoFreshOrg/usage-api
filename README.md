@@ -88,16 +88,28 @@ one count, as before.
 
 ## Subscription renewal dates
 
-Each Claude/Codex account can carry a manually entered next billing date.
-`/api/usage` account entries, the dashboard cards, and the MCP's
-`list_accounts` / `get_usage` include:
+Each Claude/Codex account's next billing date. `/api/usage` account entries,
+the dashboard cards, and the MCP's `list_accounts` / `get_usage` include:
 
 ```json
-"renewal": { "renews_at": "2026-11-10", "billing_cycle": "monthly", "days_until_renewal": 7, "source": "manual" }
+"renewal": { "renews_at": "2026-12-07", "billing_cycle": "monthly", "days_until_renewal": 24, "source": "provider" }
 ```
 
-`renewal` is `null` when no date is set. Dates are calendar dates in
-`America/Chicago` (`RENEWAL_TIME_ZONE`). Once a stored date passes, output rolls
+Where it comes from:
+
+- **`source: "provider"`**: the provider's own next billing date, used whenever
+  it reports one. Codex: `entitlement.renews_at` and `billing_period` from
+  ChatGPT's `accounts/check` (see expiry below), as an `America/Chicago`
+  calendar date. It overrides the manual date.
+- **`source: "manual"`**: the date entered by hand (below), used only when the
+  provider gives none. That is every Claude account: Anthropic's OAuth
+  endpoints carry no billing date (`/api/oauth/profile` and
+  `/api/oauth/account` have none; `subscription_details` refuses OAuth tokens;
+  checked 2026-11-13).
+
+`renewal` is `null` when no date is known, and also when the provider says the
+plan will not renew (`expiry` is shown instead). Dates are calendar dates in
+`America/Chicago` (`RENEWAL_TIME_ZONE`). Once a stored (or cached provider) date passes, output rolls
 it forward by whole monthly or yearly cycles. The stored anchor is left unchanged, so a
 31st renewal returns to the 31st after short months.
 

@@ -348,7 +348,7 @@ function currentProviders(): Record<string, any> {
     providers[key] = {
       ...snapshot, data: enrichProviderData(key, snapshot.data),
       account: { id: account.connectionId, name: account.name, family: account.family, priority: account.priority },
-      renewal: renewals.get(key),
+      renewal: renewals.resolve(key, (snapshot.data as any)?.subscription),
       expiry: expiries.resolve(key, (snapshot.data as any)?.subscription),
       source: cliProxy ? "cliproxyapi" : "9router",
     };

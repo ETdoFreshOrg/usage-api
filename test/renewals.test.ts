@@ -4,7 +4,7 @@ import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import express from "express";
-import { RenewalStore, ExpiryStore, installRenewals, nextRenewal, parseSetting, parseExpirySetting, providerExpiry, todayIn } from "../src/renewals.js";
+import { RenewalStore, ExpiryStore, installRenewals, nextRenewal, parseSetting, parseExpirySetting, providerExpiry, providerRenewal, todayIn } from "../src/renewals.js";
 
 test("future and same-day dates are kept; days_until_renewal counts calendar days", () => {
   assert.deepEqual(nextRenewal({ renews_at: "2026-11-10", billing_cycle: "monthly" }, "2026-11-03"),
@@ -158,4 +158,33 @@ test("manual expiry dates are kept in their own file and edited over REST with t
     server.closeAllConnections(); await new Promise(r => server.close(r));
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("a provider billing date wins over the manual renewal; manual is the fallback", async () => {
+  const now = Date.parse("2026-11-13T18:00:00Z");
+  const store = new RenewalStore(null);
+  await store.set("codex3", { renews_at: "2026-11-15", billing_cycle: "monthly" });
+  await store.set("claude", { renews_at: "2026-12-02", billing_cycle: "monthly" });
+  const renewing = { status: "active", will_renew: true, renews_at: "2026-12-07T13:34:35.000Z", billing_period: "monthly" };
+  assert.deepEqual(store.resolve("codex3", renewing, now), { renews_at: "2026-12-07", billing_cycle: "monthly", days_until_renewal: 24, source: "provider" });
+  // 04:51 UTC on Dec 11 is still Dec 10 in Chicago.
+  assert.equal(store.resolve("codex3", { ...renewing, renews_at: "2026-12-11T04:51:28Z" }, now)!.renews_at, "2026-12-10");
+  // Claude reports a status only: the manual date stays.
+  assert.deepEqual(store.resolve("claude", { status: "active", will_renew: null, expires_at: null }, now)!.source, "manual");
+  assert.equal(store.resolve("claude", null, now)!.renews_at, "2026-12-02");
+  // A plan that will not renew has no renewal (its expiry shows instead), even with a manual date.
+  assert.equal(store.resolve("codex3", { ...renewing, will_renew: false }, now), null);
+  // No provider date at all falls back to manual.
+  assert.equal(store.resolve("codex3", { status: "active", will_renew: true, renews_at: null }, now)!.source, "manual");
+  assert.equal(store.resolve("codex9", renewing, now)!.source, "provider");
+  assert.equal(store.resolve("codex9", null, now), null);
+});
+
+test("provider renewal: yearly plans, cancelled or inactive plans, and dates that just passed", () => {
+  const now = Date.parse("2026-11-13T18:00:00Z");
+  assert.equal(providerRenewal({ status: "active", will_renew: true, renews_at: "2027-06-01T12:00:00Z", billing_period: "annual" }, "America/Chicago", now)!.billing_cycle, "yearly");
+  assert.equal(providerRenewal({ status: "active", will_renew: true, renews_at: "2026-12-01T12:00:00Z", cancels_at: "2026-12-01T12:00:00Z" }, "America/Chicago", now), null);
+  assert.equal(providerRenewal({ status: "inactive", will_renew: true, renews_at: "2026-12-01T12:00:00Z" }, "America/Chicago", now), null);
+  // A cached date from yesterday rolls to the next cycle rather than reading in the past.
+  assert.equal(providerRenewal({ status: "active", will_renew: true, renews_at: "2026-11-12T12:00:00Z", billing_period: "monthly" }, "America/Chicago", now)!.renews_at, "2026-12-12");
 });

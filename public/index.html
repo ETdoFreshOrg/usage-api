@@ -350,7 +350,8 @@ function fmtRenewal(r) {
   const when = days === 0 ? "today" : days === 1 ? "tomorrow" : `in ${days}d`;
   const [y, m, d] = r.renews_at.split("-").map(Number);
   const date = new Date(y, m - 1, d).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-  return `<div class="sub" title="Set manually; ${escapeHtml(r.billing_cycle)} billing">renews ${when} (${escapeHtml(date)}) · ${escapeHtml(r.billing_cycle)}</div>`;
+  const from = r.source === "provider" ? "Reported by the provider" : "Set manually";
+  return `<div class="sub" title="${from}; ${escapeHtml(r.billing_cycle)} billing">renews ${when} (${escapeHtml(date)}) · ${escapeHtml(r.billing_cycle)}</div>`;
 }
 // A subscription that ends instead of renewing: amber, red in its last week or once passed.
 // source "provider" = ChatGPT reported it; "manual" = entered on usage-api (/api/expiries).

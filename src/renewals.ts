@@ -1,4 +1,5 @@
-// Manually set subscription renewal dates per account key (claude, codex3, ...).
+// Subscription renewal dates per account key (claude, codex3, ...). A provider's own
+// next billing date (ChatGPT, for Codex) wins; these manual dates are the fallback.
 // Stored as calendar dates in usage-renewals.json beside the history file;
 // hand edits to that file are picked up on the next read. The stored date is
 // an anchor: output rolls it forward by whole billing cycles once it passes.
@@ -9,7 +10,8 @@ import { rateLimit } from "express-rate-limit";
 
 export type BillingCycle = "monthly" | "yearly";
 export interface RenewalSetting { renews_at: string; billing_cycle: BillingCycle }
-export interface Renewal { renews_at: string; billing_cycle: BillingCycle; days_until_renewal: number; source: "manual" }
+/** source "provider" = the provider's own next billing date (ChatGPT, for Codex); "manual" = entered on usage-api. */
+export interface Renewal { renews_at: string; billing_cycle: BillingCycle; days_until_renewal: number; source: "manual" | "provider" }
 
 export const ACCOUNT_KEY = /^(claude|codex)\d*$/;
 export const DEFAULT_TIME_ZONE = "America/Chicago";
@@ -149,6 +151,25 @@ export class RenewalStore extends SettingsStore<RenewalSetting> {
   all(now = Date.now()): Record<string, Renewal | null> {
     return Object.fromEntries(this.keys().map(k => [k, this.get(k, now)]));
   }
+
+  /**
+   * The provider's next billing date when it reports one; null when it says the plan will not
+   * renew (the expiry shows instead); else the manual date. Claude reports no billing date.
+   */
+  resolve(key: string, subscription: ProviderSubscription | null | undefined, now = Date.now()): Renewal | null {
+    if (subscription?.will_renew === false) return null;
+    return providerRenewal(subscription, this.timeZone, now) ?? this.get(key, now);
+  }
+}
+
+/** Next billing date from a renewing provider subscription, as a calendar date; null if it gives none. */
+export function providerRenewal(sub: ProviderSubscription | null | undefined, timeZone = DEFAULT_TIME_ZONE, now = Date.now()): Renewal | null {
+  if (!sub || sub.will_renew === false || sub.cancels_at || sub.status !== "active") return null;
+  const t = sub.renews_at ? Date.parse(sub.renews_at) : NaN;
+  if (!Number.isFinite(t)) return null;
+  const cycle: BillingCycle = /year|annual/i.test(sub.billing_period ?? "") ? "yearly" : "monthly";
+  // The provider state is cached for hours; roll a date that has just passed to the next cycle.
+  return { ...nextRenewal({ renews_at: todayIn(timeZone, t), billing_cycle: cycle }, todayIn(timeZone, now)), source: "provider" };
 }
 
 // --- Subscription end dates ------------------------------------------------
@@ -173,6 +194,8 @@ export interface Expiry {
 export interface ProviderSubscription {
   status?: string | null;
   will_renew?: boolean | null;
+  renews_at?: string | null;
+  billing_period?: string | null;
   expires_at?: string | null;
   cancels_at?: string | null;
 }

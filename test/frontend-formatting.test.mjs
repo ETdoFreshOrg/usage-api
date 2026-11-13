@@ -310,6 +310,8 @@ test("account cards show the manual renewal date", () => {
   const out = sandbox.fmtRenewal({ renews_at: "2026-11-10", billing_cycle: "monthly", days_until_renewal: 7, source: "manual" });
   assert.match(out, /renews in 7d \(.*2026.*\) · monthly/);
   assert.match(sandbox.fmtRenewal({ renews_at: "2026-11-03", billing_cycle: "yearly", days_until_renewal: 0 }), /renews today/);
+  assert.match(out, /title="Set manually/);
+  assert.match(sandbox.fmtRenewal({ renews_at: "2026-12-07", billing_cycle: "monthly", days_until_renewal: 24, source: "provider" }), /title="Reported by the provider/);
 });
 
 test("account cards show a subscription end as a warning in place of the renewal", () => {
