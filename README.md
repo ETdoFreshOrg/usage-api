@@ -459,3 +459,12 @@ are forwarded. Unpriced request counts identify active model rows with no
 positive estimate; zero may mean an unknown rate or a free model, so this is
 conservative. Cache savings and cost-by-type/speed are explicitly unavailable:
 this deployed source does not report those amounts, and no rates are invented.
+
+### Configured priority in MCP account summaries
+
+`list_accounts.accounts[].priority` and `get_usage.priority` expose the existing
+snapshot's `account.priority` as a finite number or null. Explicit zero is
+preserved; absent or invalid values remain null. This is the configured CPA
+routing priority already read during account discovery, never a computed rank
+or headroom score. Both structured content and JSON text carry the same value.
+Reading it does not alter priorities, routing, quota polling or reset credits.
