@@ -14,7 +14,7 @@ export interface ProviderSnapshot {
   staleness?: string;
   error?: string | null;
   nextFetchAt?: string;
-  account?: { id: string; name: string; family: string };
+  account?: { id: string; name: string; family: string; priority?: number | null };
   renewal?: { renews_at: string; billing_cycle: string; days_until_renewal: number; source: "manual" | "provider" } | null;
   expiry?: { expires_at: string; days_until_expiry: number; source: "provider" | "manual"; ends_at: string | null } | null;
 }
@@ -121,6 +121,8 @@ export function summarizeAccount(key: string, p: ProviderSnapshot, now = Date.no
   }
   return {
     account: key,
+    // Configured routing metadata only; zero is explicit, unknown stays null.
+    priority: num(p.account?.priority),
     provider: family,
     email: p.account?.name ?? null,
     plan: d?.subscription_type ?? d?.plan_type ?? null,

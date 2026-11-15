@@ -242,3 +242,22 @@ test("summarizeAccount passes the Claude weekly/Fable reset split through, and o
     { available: 3, weekly_available: 1, fable_available: 2, other_available: 0, next_expires_at: hoursFromNow(72) });
   assert.deepEqual(summarizeAccount("claude", providers.claude, NOW).reset_credits, { available: 2, next_expires_at: hoursFromNow(72) });
 });
+
+
+test("MCP account summaries forward configured priority, preserving zero and unknown", async () => {
+  for (const priority of [5, 0, -2, 1.5, null, undefined, NaN, Infinity, "5", ""] as const) {
+    const snapshot = { ...providers.codex, account: { ...providers.codex.account, priority } };
+    const expected = typeof priority === "number" && Number.isFinite(priority) ? priority : null;
+    const context = { ...ctx, getProviders: () => ({ codex: snapshot }) };
+    const list = await callTool("list_accounts", {}, context);
+    const detail = await callTool("get_usage", { account: "codex" }, context);
+    assert.equal(list.structuredContent.accounts[0].priority, expected);
+    assert.equal(detail.structuredContent.priority, expected);
+    assert.deepEqual(JSON.parse(list.content[0].text).accounts[0].priority, expected);
+    assert.deepEqual(JSON.parse(detail.content[0].text).priority, expected);
+    assert.equal(snapshot.account.priority, priority, "the read must not change routing metadata");
+    assert.deepEqual(detail.structuredContent.raw, snapshot.data, "quotas and credit counts stay intact");
+  }
+  const missing = await callTool("list_accounts", {}, { ...ctx, getProviders: () => ({ codex: { data: null } }) });
+  assert.equal(missing.structuredContent.accounts[0].priority, null);
+});
