@@ -45,6 +45,36 @@ function proxyStatus(provider: string, file: AuthFile): ProxyAccountStatus {
   return out;
 }
 
+export class CooldownError extends Error {
+  constructor(readonly code: "not_found" | "no_match" | "ambiguous" | "disabled" | "proxy_error", message: string,
+    readonly candidates: string[] = []) { super(message); }
+}
+
+/** Routing state CPA reports for a credential; plain fields only, never tokens. */
+export interface CooldownState {
+  status: string | null; unavailable: boolean | null; quota_blocked: boolean | null; next_retry_after: string | number | null;
+  cooldowns: Array<{ scope: string | null; model: string | null; reason: string | null; retry_at: string | null; http_status: number | null }>;
+}
+
+export interface ClearedCooldown {
+  provider: string; email: string | null; auth_file: string | null; auth_index: string;
+  models_reset: string[]; before: CooldownState; after: CooldownState | null;
+}
+
+export function cooldownState(file: AuthFile): CooldownState {
+  const f = file as Record<string, any>;
+  const str = (v: unknown) => (typeof v === "string" ? v : null);
+  return {
+    status: str(f.status),
+    unavailable: typeof f.unavailable === "boolean" ? f.unavailable : null,
+    quota_blocked: typeof f.quota_blocked === "boolean" ? f.quota_blocked : null,
+    next_retry_after: typeof f.next_retry_after === "string" || typeof f.next_retry_after === "number" ? f.next_retry_after : null,
+    cooldowns: Array.isArray(f.cooldowns) ? f.cooldowns.filter((c: any) => c && typeof c === "object").slice(0, 50).map((c: any) => ({
+      scope: str(c.scope), model: str(c.model_key), reason: str(c.reason), retry_at: str(c.retry_at),
+      http_status: typeof c.http_status === "number" ? c.http_status : null })) : [],
+  };
+}
+
 function accountId(value: unknown): string | null {
   try {
     const token = typeof value === "string" && value.includes(".")
@@ -82,6 +112,60 @@ export class CliProxyClient {
     throwIfRateLimited(response);
     if (!response.ok) throw new Error(`CLIProxyAPI ${path} HTTP ${response.status}`);
     return response.json();
+  }
+
+  /**
+   * Resolve one tracked account (by its usage-api connection id) to exactly one CPA credential, using a
+   * fresh credential listing. Matches on provider + email (+ ChatGPT workspace when the account has one),
+   * across enabled and disabled files, so a duplicate login is reported instead of guessed between.
+   */
+  async resolveCredential(id: string): Promise<{ provider: string; email: string | null; file: AuthFile }> {
+    const account = this.accounts.find(a => a.id === id);
+    if (!account) throw new CooldownError("not_found", "That account is not an active credential on CLIProxyAPI.");
+    const result = await this.management("auth-files");
+    if (!Array.isArray(result.files)) throw new CooldownError("proxy_error", "CLIProxyAPI returned an invalid credential list.");
+    const matches = (result.files as AuthFile[]).filter(f => (f.provider ?? f.type) === account.provider
+      && (f.email?.trim().toLowerCase() || null) === account.email
+      && (!account.accountId || accountId(f.id_token) === account.accountId));
+    const names = matches.map(f => f.name ?? f.id ?? "(unnamed)");
+    if (matches.length === 0) throw new CooldownError("no_match", `No CLIProxyAPI credential matches ${account.provider} ${account.email ?? account.name}.`);
+    if (matches.length > 1) throw new CooldownError("ambiguous", `More than one CLIProxyAPI credential matches ${account.provider} ${account.email ?? account.name}: ${names.join(", ")}. Nothing was cleared.`, names);
+    const [file] = matches;
+    if (!file.auth_index) throw new CooldownError("no_match", `CLIProxyAPI credential ${names[0]} has no auth_index.`);
+    if (file.disabled) throw new CooldownError("disabled", `CLIProxyAPI credential ${names[0]} is disabled (paused) on the proxy; clearing its cooldown would not re-enable it, so nothing was done.`);
+    return { provider: account.provider, email: account.email, file };
+  }
+
+  /**
+   * Clear CPA's runtime cooldown / quota-exceeded routing state for one credential, via
+   * POST /v8/management/routing/cooldown/reset (the maintained route for v0's /reset-quota; same handler).
+   * Only that credential's auth_index is sent. Upstream provider quota is not touched (CPA cannot).
+   */
+  async clearCooldown(id: string): Promise<ClearedCooldown> {
+    const { provider, email, file } = await this.resolveCredential(id);
+    const authIndex = file.auth_index as string;
+    const response = await this.fetcher(`${this.baseUrl.replace(/\/$/, "")}/v8/management/routing/cooldown/reset`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ auth_index: authIndex }),
+      signal: AbortSignal.timeout(25_000),
+    });
+    let body: any = null;
+    try { body = await response.json(); } catch { /* non-JSON error page */ }
+    if (!response.ok) {
+      const detail = typeof body?.error === "string" ? `: ${body.error.split(this.key).join("[redacted]").slice(0, 200)}` : "";
+      throw new CooldownError("proxy_error", `CLIProxyAPI cooldown reset HTTP ${response.status}${detail}`);
+    }
+    if (body?.auth_index !== authIndex) throw new CooldownError("proxy_error", "CLIProxyAPI confirmed a different credential than requested.");
+    let after: CooldownState | null = null;
+    try {
+      const list = await this.management("auth-files");
+      const now = Array.isArray(list.files) ? (list.files as AuthFile[]).find(f => f.auth_index === authIndex) : undefined;
+      after = now ? cooldownState(now) : null;
+    } catch { /* The reset succeeded; the after-read is best effort. */ }
+    return { provider, email, auth_file: file.name ?? file.id ?? null, auth_index: authIndex,
+      models_reset: Array.isArray(body.models) ? body.models.filter((m: unknown) => typeof m === "string") : [],
+      before: cooldownState(file), after };
   }
 
   async listAccounts(): Promise<ProxyAccount[]> {

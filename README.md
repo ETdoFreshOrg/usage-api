@@ -129,7 +129,7 @@ curl https://usage.etdofresh.com/api/renewals      # public, read-only
 Without `USAGE_MCP_OWNER_KEY`, edits return 503. On first start, the current
 dates for claude, claude3, claude4, codex, codex2 and codex3 are added only for
 keys absent from the file. A `DELETE` stores `null`, so seeding never
-restores a cleared date. The MCP stays read-only and cannot change these dates.
+restores a cleared date. No MCP tool can change these dates.
 
 ## Subscription end dates (expiry)
 
@@ -179,12 +179,13 @@ curl https://usage.etdofresh.com/api/expiries      # public, read-only
 The 9router fallback path (no `CLIPROXYAPI_MANAGEMENT_KEY`) does not read
 subscription state, so only manual dates apply there.
 
-## MCP (read-only, owner-only)
+## MCP (owner-only; read tools plus one narrow write)
 
 `https://usage.etdofresh.com/mcp` is a stateless Streamable HTTP MCP server for
-Claude / Duet custom connectors. It reads the same in-memory snapshot as
-`/api/usage` and has no write tools: it cannot pause accounts, spend reset
-credits or change CLIProxyAPI.
+Claude / Duet custom connectors. Its read tools use the same in-memory snapshot as
+`/api/usage`. The one write tool, `clear_proxy_cooldown`, clears CLIProxyAPI's
+runtime cooldown for one named account. No tool can pause accounts, spend reset
+credits, change priorities or change any other CLIProxyAPI setting.
 
 | Tool | What it returns |
 | --- | --- |
@@ -193,6 +194,7 @@ credits or change CLIProxyAPI.
 | `suggest_account(provider?)` | Accounts ranked by room for more work (blocked last); an account with no weekly limit is ranked by its 24-hour window (`ranked_by`) |
 | `usage_history(account, days?, granularity?)` | Weekly (and 5-hour / 24-hour, where the account has them) % over time |
 | `recent_requests(hours?)` | Per-account request/error/token counts from CPA Manager, plus the latest 20 requests |
+| `clear_proxy_cooldown(account)` | **Write.** Clears CPA's runtime cooldown / quota-exceeded routing state for exactly one account key; returns provider, auth file name, `auth_index` and cooldown state before/after. Use only when ET names the account |
 
 Sign-in uses the single-owner OAuth module shared with imessage-mcp and
 memory-database (`oauth/`), with endpoints under `/mcp/oauth` and scope
@@ -201,6 +203,24 @@ memory-database (`oauth/`), with endpoints under `/mcp/oauth` and scope
 hashes live in `mcp-oauth.db` on the `usage-api-data` volume. Without the key
 the MCP is off and `/mcp` returns 503. Connector URL:
 `https://usage.etdofresh.com/mcp` (client ID blank, or `usage-claude`).
+
+### clear_proxy_cooldown
+
+One account key per call (`claude3`, `codex2`, ...); no batch, `all` or wildcard.
+The key's CPA identity (provider + email, plus the ChatGPT workspace for Codex) is
+matched against a fresh `GET /v0/management/auth-files`, enabled and disabled files
+alike. Exactly one match is required: none, several (named in the error) or a disabled
+(paused) credential is refused and nothing is sent. The reset is
+`POST /v8/management/routing/cooldown/reset {"auth_index": ...}`, the maintained v8
+route for v0's `POST /v0/management/reset-quota` (same handler; verified in
+CLIProxyAPI v8.0.62, commit 4b3f2c7e). It clears CPA's per-credential and per-model
+cooldowns and marks the credential active unless it has an auth (401) failure. CPA
+then re-saves the credential's existing metadata, the same save it makes after every
+request result; the reset changes no metadata, and cooldowns are not stored in the file. Upstream Anthropic/OpenAI quota is untouched, so an account that is still
+out of quota goes back into cooldown on its next request. Uses the existing
+`CLIPROXYAPI_MANAGEMENT_KEY`; the key and tokens never appear in results or logs. Each
+call logs `mcp_tool_call` with the account and `proxy_cooldown_cleared` with the auth
+file and `auth_index`.
 
 Per-account counts in `recent_requests` come from CPA Manager's
 `account_snapshot`; they are only served behind OAuth. The public

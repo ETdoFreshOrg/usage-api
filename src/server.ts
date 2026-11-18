@@ -7,7 +7,7 @@ import { Poller } from "./cache.js";
 import { AccountPoller, UpstreamSpacer } from "./account-poller.js";
 import { HistoryGranularity, HistoryStore } from "./history.js";
 import { assignAccounts } from "./accounts.js";
-import { CliProxyClient } from "./providers/cliproxy.js";
+import { CliProxyClient, CooldownError } from "./providers/cliproxy.js";
 import { RecentRequests, AccountActivityReader } from "./recent.js";
 import { installMcp } from "./mcp.js";
 import { RenewalStore, ExpiryStore, SEED_RENEWALS, installRenewals } from "./renewals.js";
@@ -388,6 +388,14 @@ const mcpEnabled = installMcp(app, {
   getAnalytics: async () => analyticsReader ? await analyticsReader.get() : null,
   getProviders: currentProviders,
   getProxyAccounts: () => cliProxy?.proxyAccounts ?? null,
+  ...(cliProxy ? { clearProxyCooldown: async (key: string) => {
+    const account = accountPollers.get(key);
+    if (!account) throw new CooldownError("not_found", "No tracked account with that key. Use list_accounts.");
+    const cleared = await cliProxy.clearCooldown(account.connectionId);
+    console.log(JSON.stringify({ event: "proxy_cooldown_cleared", account: key, provider: cleared.provider,
+      auth_file: cleared.auth_file, auth_index: cleared.auth_index, models_reset: cleared.models_reset.length }));
+    return cleared;
+  } } : {}),
   getHistory: (granularity) => history.toSeries(granularity),
   getActivity: async (hours) => {
     if (!accountActivity) return null;

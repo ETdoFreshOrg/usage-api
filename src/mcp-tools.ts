@@ -1,9 +1,11 @@
-// Read-only MCP tools over the usage snapshot. Every tool reads data usage-api
-// already holds in memory (or its recent-request cache); none of them can pause
-// accounts, spend reset credits or change anything on CLIProxyAPI.
+// MCP tools over the usage snapshot. All but one read data usage-api already holds
+// in memory (or its recent-request cache). The one write, clear_proxy_cooldown,
+// clears CLIProxyAPI's runtime cooldown for exactly one named account; no tool can
+// pause accounts, spend reset credits, change priorities or touch other proxy settings.
 import type { HistorySeriesResponse, HistoryGranularity } from "./history.js";
 import type { RecentExchange, ActivitySummary } from "./recent.js";
-import type { ProxyAccountStatus } from "./providers/cliproxy.js";
+import type { ProxyAccountStatus, ClearedCooldown } from "./providers/cliproxy.js";
+import { CooldownError } from "./providers/cliproxy.js";
 
 export const SCOPE = "usage.read";
 
@@ -26,6 +28,8 @@ export interface ToolContext {
   getActivity: (hours: number) => Promise<ActivitySummary | null>;
   getHistory: (granularity: HistoryGranularity) => HistorySeriesResponse;
   getRecent: () => Promise<RecentExchange[] | null>;
+  /** Clears CLIProxyAPI's runtime cooldown for one tracked account key; absent when the proxy is not configured. */
+  clearProxyCooldown?: (account: string) => Promise<ClearedCooldown>;
   now?: () => number;
 }
 
@@ -73,6 +77,14 @@ export const tools = [
       hours: { type: "integer", minimum: 1, maximum: 168, default: 24, description: "Window for per-account counts, in hours (1-168)." },
     } },
     annotations: { title: "Recent proxy requests", ...READ_ONLY },
+  },
+  {
+    name: "clear_proxy_cooldown",
+    description: "WRITE. Use only when ET explicitly names one account and asks to clear its proxy cooldown. Clears CLIProxyAPI's own runtime cooldown / quota-exceeded routing state for exactly one Claude or Codex account (key from list_accounts, e.g. claude3 or codex2), so the proxy will try that account again right away. It does NOT reset or add upstream quota: Anthropic/OpenAI limits are unchanged, and if the account is still out of quota its next request will put it back into cooldown. It does not change priorities, enable/disable (pause) state, routing strategy, credentials or any other proxy setting. One account per call; no batch or wildcard. If the key does not map to exactly one proxy credential it refuses and lists the candidates. Returns the account, provider, auth file name, auth_index and the cooldown state before and after.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["account"], properties: {
+      account: { type: "string", pattern: "^(claude|codex)\\d*$", description: "Exactly one account key from list_accounts, such as claude3 or codex2." },
+    } },
+    annotations: { title: "Clear one account's proxy cooldown", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
   },
 ] as const;
 
@@ -260,6 +272,22 @@ export async function callTool(name: string, rawArgs: unknown, ctx: ToolContext)
         latest: (recent ?? []).map(r => ({ at: r.startedAt, model: r.model, effort: r.jev.effort, outcome: r.outcome })),
         notes: "by_account counts at most the newest 1000 requests in the window; total_in_window is the proxy's full count.",
       });
+    }
+    if (name === "clear_proxy_cooldown") {
+      const extra = Object.keys(args).filter(k => k !== "account");
+      if (extra.length) return fail("invalid_argument", "Only account is accepted (one account key).");
+      if (typeof args.account !== "string" || !ACCOUNT_KEY.test(args.account))
+        return fail("invalid_argument", "account must be exactly one Claude or Codex key from list_accounts, such as claude3 or codex2.");
+      if (!ctx.getProviders()[args.account]) return fail("not_found", "No tracked account with that key. Use list_accounts.");
+      if (!ctx.clearProxyCooldown) return fail("unavailable", "CLIProxyAPI is not configured on usage-api.");
+      try {
+        const cleared = await ctx.clearProxyCooldown(args.account);
+        return ok({ account: args.account, cleared: true, ...cleared,
+          note: "Only CLIProxyAPI's runtime cooldown for this credential was cleared. Upstream provider quota is unchanged; if the account is still out of quota, its next request will put it back into cooldown." });
+      } catch (err) {
+        if (err instanceof CooldownError) return fail(err.code, err.message);
+        throw err;
+      }
     }
     return fail("unknown_tool", "Unknown tool.");
   } catch {

@@ -1,4 +1,4 @@
-// Read-only MCP endpoint at /mcp, behind the same single-owner OAuth that
+// MCP endpoint at /mcp (read tools plus one narrow write, clear_proxy_cooldown), behind the same single-owner OAuth that
 // imessage-mcp and memory-database use. Consent needs USAGE_MCP_OWNER_KEY.
 // Without that key the MCP stays off and /mcp answers 503; /api/* is unaffected.
 import express from "express";
@@ -30,13 +30,13 @@ const deps = {
 
 const consent = {
   title: "Authorize usage-api MCP",
-  describe: () => `<p>Grants the <strong>${SCOPE}</strong> scope: read ET's Claude and Codex account usage (weekly %, resets, pace, recent proxy requests) from usage-api.</p><p>Read-only: it cannot pause accounts, use reset credits or change anything.</p>`,
+  describe: () => `<p>Grants the <strong>${SCOPE}</strong> scope: read ET's Claude and Codex account usage (weekly %, resets, pace, recent proxy requests) from usage-api.</p><p>Mostly read-only. One tool, clear_proxy_cooldown, can clear CLIProxyAPI's runtime cooldown for one named account. Nothing can pause accounts, use reset credits, change priorities or change other proxy settings.</p>`,
   ownerKeyLabel: "usage-api MCP owner key",
   ownerKeyNote: "Enter the usage-api MCP owner key here. It is never forwarded to the connecting application.",
   allowLabel: () => "Authorize usage reading",
 };
 
-const INSTRUCTIONS = "Read-only view of ET's AI account usage from usage-api. Use list_accounts for the overview and suggest_account to pick which Claude or Codex account has room for more work. Most accounts have a weekly limit; Codex and some Claude accounts also have a 5-hour window (five_hour is null where there is none), and Codex accounts can report a 24-hour window (one_day; usually null). Nothing here changes accounts.";
+const INSTRUCTIONS = "Read-only view of ET's AI account usage from usage-api. Use list_accounts for the overview and suggest_account to pick which Claude or Codex account has room for more work. Most accounts have a weekly limit; Codex and some Claude accounts also have a 5-hour window (five_hour is null where there is none), and Codex accounts can report a 24-hour window (one_day; usually null). All tools are read-only except clear_proxy_cooldown, which is a write: use it only when ET explicitly names one account and asks to clear its proxy cooldown. It clears only CLIProxyAPI's runtime cooldown for that one account and cannot reset upstream provider quota. Nothing else here changes accounts.";
 
 export interface McpOptions extends ToolContext {
   ownerKey?: string;
@@ -78,7 +78,8 @@ export function installMcp(app: express.Express, opts: McpOptions) {
     server.setRequestHandler(CallToolRequestSchema, async ({ params }) => {
       const started = Date.now();
       const result = await callTool(params.name, params.arguments, opts);
-      log({ event: "mcp_tool_call", tool: params.name, actor, ok: !("isError" in result), ms: Date.now() - started });
+      const account = params.name === "clear_proxy_cooldown" && typeof params.arguments?.account === "string" ? String(params.arguments.account).slice(0, 40) : undefined;
+      log({ event: "mcp_tool_call", tool: params.name, actor, ...(account ? { account } : {}), ok: !("isError" in result), ms: Date.now() - started });
       return result as any;
     });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

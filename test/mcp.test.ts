@@ -98,7 +98,7 @@ test("/mcp requires OAuth and consent needs the owner key", async () => {
     assert.equal(padded.status, 302);
     const bad = await signIn(s.base, "wrong");
     assert.equal(bad.status, 401);
-    assert.match(bad.html, /Read-only/);
+    assert.match(bad.html, /Mostly read-only. One tool, clear_proxy_cooldown/);
   } finally { await s.close(); }
 });
 
@@ -116,15 +116,21 @@ test("ET Bot signs in through owner consent at its one registered callback only"
   } finally { await s.close(); }
 });
 
-test("signed-in client lists read-only tools and reads usage", async () => {
+test("signed-in client lists the tools (all read-only but clear_proxy_cooldown) and reads usage", async () => {
   const s = await start();
   try {
     const { tokens } = await signIn(s.base);
     assert.ok(tokens.access_token);
     const list = await (await rpc(s.base, tokens.access_token, "tools/list")).json();
     const names = list.result.tools.map((t: any) => t.name);
-    assert.deepEqual(names, ["list_accounts", "get_usage", "suggest_account", "usage_history", "recent_requests"]);
-    for (const t of list.result.tools) assert.equal(t.annotations.readOnlyHint, true);
+    assert.deepEqual(names, ["list_accounts", "get_usage", "suggest_account", "usage_history", "recent_requests", "clear_proxy_cooldown"]);
+    for (const t of list.result.tools) assert.equal(t.annotations.readOnlyHint, t.name !== "clear_proxy_cooldown");
+    const write = list.result.tools.find((t: any) => t.name === "clear_proxy_cooldown");
+    assert.equal(write.annotations.destructiveHint, false);
+    assert.deepEqual(write.inputSchema.required, ["account"]);
+    assert.equal(write.inputSchema.additionalProperties, false);
+    assert.match(write.description, /^WRITE\. Use only when ET explicitly names one account/);
+    assert.match(write.description, /does NOT reset or add upstream quota/);
 
     const accounts = (await call(s.base, tokens.access_token, "list_accounts")).structuredContent;
     assert.deepEqual(accounts.accounts.map((a: any) => a.account), ["claude", "claude3", "claude4", "codex"]);
@@ -260,4 +266,60 @@ test("MCP account summaries forward configured priority, preserving zero and unk
   }
   const missing = await callTool("list_accounts", {}, { ...ctx, getProviders: () => ({ codex: { data: null } }) });
   assert.equal(missing.structuredContent.accounts[0].priority, null);
+});
+
+test("clear_proxy_cooldown takes exactly one tracked account key and passes it through", async () => {
+  const seen: string[] = [];
+  const cleared = { provider: "claude", email: "three@example.com", auth_file: "claude-x-three@example.com.json", auth_index: "abc123",
+    models_reset: ["claude-opus-5-5"], before: { status: "error", unavailable: true, quota_blocked: true, next_retry_after: "2026-11-19T13:00:00Z", cooldowns: [] },
+    after: { status: "active", unavailable: false, quota_blocked: false, next_retry_after: null, cooldowns: [] } };
+  const context: ToolContext = { ...ctx, clearProxyCooldown: async (account) => { seen.push(account); return cleared; } };
+  const r: any = await callTool("clear_proxy_cooldown", { account: "claude3" }, context);
+  assert.equal(r.isError, undefined);
+  assert.deepEqual(seen, ["claude3"]);
+  assert.equal(r.structuredContent.account, "claude3");
+  assert.equal(r.structuredContent.auth_index, "abc123");
+  assert.equal(r.structuredContent.before.unavailable, true);
+  assert.equal(r.structuredContent.after.unavailable, false);
+  for (const args of [{}, { account: "all" }, { account: "*" }, { account: ["claude", "claude3"] }, { account: "claude3,codex" },
+    { account: "zai" }, { account: "claude3", all: true }]) {
+    const bad: any = await callTool("clear_proxy_cooldown", args, context);
+    assert.equal(bad.isError, true, JSON.stringify(args));
+    assert.equal(bad.structuredContent.error, "invalid_argument");
+  }
+  assert.equal(((await callTool("clear_proxy_cooldown", { account: "claude9" }, context)) as any).structuredContent.error, "not_found");
+  assert.equal(((await callTool("clear_proxy_cooldown", { account: "claude3" }, ctx)) as any).structuredContent.error, "unavailable");
+  assert.deepEqual(seen, ["claude3"]);
+});
+
+test("clear_proxy_cooldown reports resolution errors with their code and candidates", async () => {
+  const { CooldownError } = await import("../src/providers/cliproxy.js");
+  const context: ToolContext = { ...ctx, clearProxyCooldown: async () => {
+    throw new CooldownError("ambiguous", "More than one CLIProxyAPI credential matches claude three@example.com: a.json, b.json. Nothing was cleared.", ["a.json", "b.json"]); } };
+  const r: any = await callTool("clear_proxy_cooldown", { account: "claude3" }, context);
+  assert.equal(r.isError, true);
+  assert.equal(r.structuredContent.error, "ambiguous");
+  assert.match(r.structuredContent.message, /a\.json, b\.json/);
+  const boom: any = await callTool("clear_proxy_cooldown", { account: "claude3" }, { ...ctx, clearProxyCooldown: async () => { throw new Error("secret detail"); } });
+  assert.equal(boom.structuredContent.error, "internal_error");
+  assert.ok(!JSON.stringify(boom).includes("secret detail"));
+});
+
+test("clear_proxy_cooldown over /mcp needs the same OAuth sign-in and logs the account, not results", async () => {
+  const logs: any[] = [];
+  const app = express();
+  installMcp(app, { ...ctx, ownerKey, publicOrigin: origin, log: (e) => logs.push(e),
+    clearProxyCooldown: async () => ({ provider: "claude", email: "three@example.com", auth_file: "f.json", auth_index: "abc123", models_reset: [],
+      before: { status: "error", unavailable: true, quota_blocked: true, next_retry_after: null, cooldowns: [] }, after: null }) });
+  const server = await new Promise<any>(r => { const s = app.listen(0, "127.0.0.1", () => r(s)); });
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const anon = await rpc(base, null, "tools/call", { name: "clear_proxy_cooldown", arguments: { account: "claude3" } });
+    assert.equal(anon.status, 401);
+    const { tokens } = await signIn(base);
+    const r = await call(base, tokens.access_token, "clear_proxy_cooldown", { account: "claude3" });
+    assert.equal(r.structuredContent.auth_index, "abc123");
+    const entry = logs.find(e => e.tool === "clear_proxy_cooldown");
+    assert.deepEqual({ account: entry.account, ok: entry.ok }, { account: "claude3", ok: true });
+  } finally { server.closeAllConnections(); await new Promise(r => server.close(r)); }
 });
