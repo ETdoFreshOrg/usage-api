@@ -123,7 +123,11 @@ test("signed-in client lists the tools (all read-only but clear_proxy_cooldown) 
     assert.ok(tokens.access_token);
     const list = await (await rpc(s.base, tokens.access_token, "tools/list")).json();
     const names = list.result.tools.map((t: any) => t.name);
-    assert.deepEqual(names, ["list_accounts", "get_usage", "suggest_account", "usage_history", "recent_requests", "clear_proxy_cooldown"]);
+    assert.deepEqual(names, ["list_accounts", "get_usage", "suggest_account", "usage_history", "recent_requests", "clear_proxy_cooldown", "list_models", "refresh_usage"]);
+    const describe = (n: string) => list.result.tools.find((t: any) => t.name === n).description;
+    assert.match(describe("list_models"), /fresh GET \/v1\/models/);
+    assert.match(describe("list_models"), /NOT a forced refresh of the upstream provider model catalogs/);
+    assert.match(describe("refresh_usage"), /does not use or redeem reset credits, reset any provider quota, or touch CLIProxyAPI cooldown/);
     for (const t of list.result.tools) assert.equal(t.annotations.readOnlyHint, t.name !== "clear_proxy_cooldown");
     const write = list.result.tools.find((t: any) => t.name === "clear_proxy_cooldown");
     assert.equal(write.annotations.destructiveHint, false);
@@ -322,4 +326,82 @@ test("clear_proxy_cooldown over /mcp needs the same OAuth sign-in and logs the a
     const entry = logs.find(e => e.tool === "clear_proxy_cooldown");
     assert.deepEqual({ account: entry.account, ok: entry.ok }, { account: "claude3", ok: true });
   } finally { server.closeAllConnections(); await new Promise(r => server.close(r)); }
+});
+
+// refresh_usage
+const refreshCtx = (outcome: any, snapshot: any, seen: string[] = []): ToolContext => ({ ...ctx,
+  refreshUsage: async (account) => { seen.push(account); return { outcome, snapshot }; } });
+const OUT = { attempted: true, attemptedAt: hoursFromNow(0), ok: true, error: null, skippedReason: null, retryAt: null, minIntervalSec: 60 };
+
+test("refresh_usage: a successful check is fresh, with when it ran and when each window was observed", async () => {
+  const seen: string[] = [];
+  const snap = { ...providers.claude, fetchedAt: hoursFromNow(0), ageSec: 0, activeFetchedAt: hoursFromNow(0), dataSource: "active", observedAt: hoursFromNow(-1) };
+  const r: any = (await callTool("refresh_usage", { account: "claude" }, refreshCtx(OUT, snap, seen))).structuredContent;
+  assert.deepEqual(seen, ["claude"]);
+  assert.equal(r.freshness, "fresh");
+  assert.equal(r.poll.attempted_at, hoursFromNow(0));
+  assert.equal(r.poll.ok, true);
+  assert.equal(r.last_active_check_at, hoursFromNow(0));
+  assert.equal(r.windows.weekly.observed_at, hoursFromNow(0));
+  assert.equal(r.windows.weekly.used_percent, 49);
+  assert.equal(r.windows.weekly_fable.observed_at, hoursFromNow(0));
+  assert.equal(r.data_age_minutes, 0);
+});
+
+test("refresh_usage: a failed check returns the last values as stale with their age and the reason", async () => {
+  const failed = { ...OUT, ok: false, error: "claude usage via CLIProxyAPI HTTP 401" };
+  // Last good active check 2 h ago; newer passive headers 10 min ago cover only the main windows.
+  const snap = { ...providers.claude, fetchedAt: hoursFromNow(-1 / 6), activeFetchedAt: hoursFromNow(-2), dataSource: "passive", observedAt: hoursFromNow(-1 / 6) };
+  const r: any = (await callTool("refresh_usage", { account: "claude" }, refreshCtx(failed, snap))).structuredContent;
+  assert.equal(r.freshness, "stale");
+  assert.equal(r.poll.error, "claude usage via CLIProxyAPI HTTP 401");
+  assert.equal(r.windows.weekly.observed_at, hoursFromNow(-1 / 6));
+  assert.equal(r.windows.weekly.age_minutes, 10);
+  assert.equal(r.windows.weekly_fable.observed_at, hoursFromNow(-2));
+  assert.equal(r.windows.weekly_fable.age_minutes, 120);
+  assert.match(r.note, /Not refreshed/);
+  // Skipped for backoff or the minimum gap: also stale, with when the next check is allowed.
+  const skipped = { ...OUT, attempted: false, attemptedAt: null, ok: false, skippedReason: "too_soon", retryAt: hoursFromNow(0.01) };
+  const s: any = (await callTool("refresh_usage", { account: "claude" }, refreshCtx(skipped, { ...snap, dataSource: "active", fetchedAt: hoursFromNow(-0.005), activeFetchedAt: hoursFromNow(-0.005) }))).structuredContent;
+  assert.equal(s.freshness, "stale");
+  assert.equal(s.poll.skipped_reason, "too_soon");
+  assert.equal(s.poll.next_allowed_at, hoursFromNow(0.01));
+});
+
+test("refresh_usage: no data and a failed check is unavailable, never zero usage", async () => {
+  const failed = { ...OUT, ok: false, error: "rate-limited (retry in 901s)" };
+  const r: any = (await callTool("refresh_usage", { account: "claude3" }, refreshCtx(failed,
+    { data: null, fetchedAt: null, ageSec: null, staleness: "stale", error: "rate-limited (retry in 901s)", account: providers.claude3.account }))).structuredContent;
+  assert.equal(r.freshness, "unavailable");
+  assert.equal(r.windows, null);
+  assert.equal(r.data_age_minutes, null);
+  assert.equal(r.poll.error, "rate-limited (retry in 901s)");
+});
+
+test("refresh_usage takes exactly one tracked key and never echoes credentials", async () => {
+  const seen: string[] = [];
+  const context = refreshCtx(OUT, { ...providers.codex, activeFetchedAt: hoursFromNow(0), dataSource: "active", token: "sk-secret-token", raw_auth: "Bearer zzz" }, seen);
+  for (const args of [{}, { account: "all" }, { account: "*" }, { account: ["codex", "claude"] }, { account: "codex,claude" }, { account: "zai" }, { account: "codex", force: true }]) {
+    const bad: any = await callTool("refresh_usage", args, context);
+    assert.equal(bad.structuredContent.error, "invalid_argument", JSON.stringify(args));
+  }
+  assert.equal(((await callTool("refresh_usage", { account: "codex9" }, context)) as any).structuredContent.error, "not_found");
+  assert.equal(((await callTool("refresh_usage", { account: "codex" }, ctx)) as any).structuredContent.error, "unavailable");
+  assert.deepEqual(seen, []);
+  const r: any = await callTool("refresh_usage", { account: "codex" }, context);
+  assert.deepEqual(seen, ["codex"]);
+  const text = JSON.stringify(r);
+  for (const secret of ["sk-secret-token", "Bearer zzz"]) assert.ok(!text.includes(secret));
+});
+
+test("list_models tool passes the fresh list through and reports errors by code", async () => {
+  const list = { models: [{ id: "gpt-6.1-sol", owned_by: "openai" }], count: 1, fetched_at: hoursFromNow(0) };
+  const r: any = (await callTool("list_models", {}, { ...ctx, listModels: async () => list })).structuredContent;
+  assert.equal(r.count, 1);
+  assert.equal(r.models[0].id, "gpt-6.1-sol");
+  assert.match(r.source, /not a forced upstream catalog refresh/);
+  const { ProxyModelsError } = await import("../src/proxy-models.js");
+  const e: any = (await callTool("list_models", {}, { ...ctx, listModels: async () => { throw new ProxyModelsError("unavailable", "not configured"); } })).structuredContent;
+  assert.equal(e.error, "unavailable");
+  assert.equal(((await callTool("list_models", { refresh: true }, { ...ctx, listModels: async () => list })) as any).structuredContent.error, "invalid_argument");
 });

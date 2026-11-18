@@ -36,7 +36,7 @@ const consent = {
   allowLabel: () => "Authorize usage reading",
 };
 
-const INSTRUCTIONS = "Read-only view of ET's AI account usage from usage-api. Use list_accounts for the overview and suggest_account to pick which Claude or Codex account has room for more work. Most accounts have a weekly limit; Codex and some Claude accounts also have a 5-hour window (five_hour is null where there is none), and Codex accounts can report a 24-hour window (one_day; usually null). All tools are read-only except clear_proxy_cooldown, which is a write: use it only when ET explicitly names one account and asks to clear its proxy cooldown. It clears only CLIProxyAPI's runtime cooldown for that one account and cannot reset upstream provider quota. Nothing else here changes accounts.";
+const INSTRUCTIONS = "Read-only view of ET's AI account usage from usage-api. Use list_accounts for the overview and suggest_account to pick which Claude or Codex account has room for more work. Most accounts have a weekly limit; Codex and some Claude accounts also have a 5-hour window (five_hour is null where there is none), and Codex accounts can report a 24-hour window (one_day; usually null). list_models fetches the proxy's current model list live (not an upstream catalog refresh). refresh_usage re-checks one account's usage now, within usage-api's rate limits; it only reads usage. All tools are read-only except clear_proxy_cooldown, which is a write: use it only when ET explicitly names one account and asks to clear its proxy cooldown. It clears only CLIProxyAPI's runtime cooldown for that one account and cannot reset upstream provider quota. Nothing else here changes accounts.";
 
 export interface McpOptions extends ToolContext {
   ownerKey?: string;

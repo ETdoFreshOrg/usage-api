@@ -1,11 +1,22 @@
-// MCP tools over the usage snapshot. All but one read data usage-api already holds
-// in memory (or its recent-request cache). The one write, clear_proxy_cooldown,
-// clears CLIProxyAPI's runtime cooldown for exactly one named account; no tool can
-// pause accounts, spend reset credits, change priorities or touch other proxy settings.
+// MCP tools over the usage snapshot. Most read data usage-api already holds in memory
+// (or its recent-request cache); list_models fetches CLIProxyAPI's model list live, and
+// refresh_usage runs one on-demand usage check for one account through the normal poller.
+// The one write, clear_proxy_cooldown, clears CLIProxyAPI's runtime cooldown for exactly
+// one named account; no tool can pause accounts, spend reset credits, change priorities
+// or touch other proxy settings.
 import type { HistorySeriesResponse, HistoryGranularity } from "./history.js";
 import type { RecentExchange, ActivitySummary } from "./recent.js";
 import type { ProxyAccountStatus, ClearedCooldown } from "./providers/cliproxy.js";
 import { CooldownError } from "./providers/cliproxy.js";
+import type { ProxyModelList } from "./proxy-models.js";
+import { ProxyModelsError } from "./proxy-models.js";
+import type { RefreshOutcome } from "./account-poller.js";
+
+/** What refresh_usage needs back from the server: the outcome plus the account's state afterwards. */
+export interface UsageRefresh {
+  outcome: RefreshOutcome;
+  snapshot: ProviderSnapshot & { dataSource?: "passive" | "active" | null; observedAt?: string | null; activeFetchedAt?: string | null };
+}
 
 export const SCOPE = "usage.read";
 
@@ -30,6 +41,10 @@ export interface ToolContext {
   getRecent: () => Promise<RecentExchange[] | null>;
   /** Clears CLIProxyAPI's runtime cooldown for one tracked account key; absent when the proxy is not configured. */
   clearProxyCooldown?: (account: string) => Promise<ClearedCooldown>;
+  /** Fresh GET /v1/models on CLIProxyAPI; absent when the proxy is not configured. */
+  listModels?: () => Promise<ProxyModelList>;
+  /** One on-demand usage check for one tracked account key, through its poller. */
+  refreshUsage?: (account: string) => Promise<UsageRefresh | null>;
   now?: () => number;
 }
 
@@ -85,6 +100,20 @@ export const tools = [
       account: { type: "string", pattern: "^(claude|codex)\\d*$", description: "Exactly one account key from list_accounts, such as claude3 or codex2." },
     } },
     annotations: { title: "Clear one account's proxy cooldown", readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  {
+    name: "list_models",
+    description: "The models CLIProxyAPI is serving right now: a fresh GET /v1/models against the proxy on every call (nothing cached), returning each model id with the owner/type fields the proxy gives, the count and the fetch time. This only reads the proxy's current list; it is NOT a forced refresh of the upstream provider model catalogs (the proxy refreshes those on its own schedule). Read-only.",
+    inputSchema: { type: "object", additionalProperties: false, properties: {} },
+    annotations: { title: "List proxy models", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  {
+    name: "refresh_usage",
+    description: "Fetch fresh quota usage (weekly, 5-hour, 24-hour and per-model %) for exactly one Claude or Codex account now, instead of waiting for the next scheduled check, using usage-api's normal poller and existing provider access. It only FETCHES usage: it does not use or redeem reset credits, reset any provider quota, or touch CLIProxyAPI cooldown or routing. It respects usage-api's rate limits: no check is sent while the account is in 429/error backoff or within the minimum interval since its last check; the result then says why and when a check is next allowed. Returns when this poll ran, when each window was last successfully observed, and freshness: fresh only if this call's check succeeded; otherwise the last known values marked stale with their age and the error, or unavailable if there are none. One account per call; no batch or wildcard.",
+    inputSchema: { type: "object", additionalProperties: false, required: ["account"], properties: {
+      account: { type: "string", pattern: "^(claude|codex)\\d*$", description: "Exactly one account key from list_accounts, such as claude3 or codex2." },
+    } },
+    annotations: { title: "Refresh one account's usage", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   },
 ] as const;
 
@@ -176,6 +205,47 @@ function accounts(ctx: ToolContext, provider?: string) {
   return Object.entries(ctx.getProviders())
     .filter(([key, p]) => ACCOUNT_KEY.test(key) && (!provider || (p.account?.family ?? key.replace(/\d+$/, "")) === provider))
     .map(([key, p]) => withProxy(summarizeAccount(key, p, now), ctx.getProxyAccounts()));
+}
+
+const MAIN_WINDOWS = new Set(["weekly", "five_hour", "one_day"]);
+
+/** refresh_usage result: poll outcome, freshness that is only "fresh" when this call's check succeeded, per-window observation times. */
+export function refreshResult(key: string, { outcome, snapshot }: UsageRefresh, now: number) {
+  const summary = summarizeAccount(key, snapshot, now);
+  const hasData = snapshot.data != null;
+  const freshness = outcome.ok ? "fresh" : hasData ? "stale" : "unavailable";
+  // Passive data (CPA request headers) covers only the main windows; the rest come from the last active check.
+  const observedAt = (window: string) => snapshot.dataSource === "passive" && MAIN_WINDOWS.has(window)
+    ? snapshot.observedAt ?? null : snapshot.activeFetchedAt ?? snapshot.fetchedAt ?? null;
+  const at = (iso: string | null) => (iso && Number.isFinite(Date.parse(iso)) ? round((now - Date.parse(iso)) / 60_000) : null);
+  const windows: Record<string, unknown> = {};
+  if (hasData) {
+    for (const name of ["weekly", "five_hour", "one_day"] as const) {
+      const w = (summary as any)[name];
+      if (w) windows[name] = { ...w, observed_at: observedAt(name), age_minutes: at(observedAt(name)) };
+    }
+    for (const [model, w] of Object.entries((summary as any).weekly_by_model ?? {}))
+      windows[`weekly_${model}`] = { ...(w as object), observed_at: observedAt(model), age_minutes: at(observedAt(model)) };
+  }
+  return {
+    account: key, provider: summary.provider, email: summary.email,
+    freshness,
+    poll: {
+      attempted: outcome.attempted, attempted_at: outcome.attemptedAt, ok: outcome.ok, error: outcome.error,
+      skipped_reason: outcome.skippedReason, next_allowed_at: outcome.retryAt, min_interval_seconds: outcome.minIntervalSec,
+    },
+    last_active_check_at: snapshot.activeFetchedAt ?? null,
+    last_passive_headers_at: snapshot.observedAt ?? null,
+    data_age_minutes: hasData ? at(snapshot.fetchedAt ?? null) : null,
+    windows: hasData ? windows : null,
+    plan: summary.plan,
+    reset_credits: summary.reset_credits,
+    note: freshness === "fresh"
+      ? "Fetched just now. Usage was only read: no reset credit was used, no quota was reset, and proxy cooldowns were not touched."
+      : freshness === "stale"
+        ? "Not refreshed by this call (see poll); these are the last known values, with their age. Usage was only read; nothing was reset."
+        : "No usage data is available for this account yet, and this call did not get any (see poll).",
+  };
 }
 
 export function suggest(list: ReturnType<typeof summarizeAccount>[]) {
@@ -288,6 +358,28 @@ export async function callTool(name: string, rawArgs: unknown, ctx: ToolContext)
         if (err instanceof CooldownError) return fail(err.code, err.message);
         throw err;
       }
+    }
+    if (name === "list_models") {
+      if (Object.keys(args).length) return fail("invalid_argument", "list_models takes no arguments.");
+      if (!ctx.listModels) return fail("unavailable", "CLIProxyAPI is not configured on usage-api.");
+      try {
+        const list = await ctx.listModels();
+        return ok({ ...list, source: "GET /v1/models on CLIProxyAPI (fresh fetch; not a forced upstream catalog refresh)" });
+      } catch (err) {
+        if (err instanceof ProxyModelsError) return fail(err.code, err.message);
+        throw err;
+      }
+    }
+    if (name === "refresh_usage") {
+      const extra = Object.keys(args).filter(k => k !== "account");
+      if (extra.length) return fail("invalid_argument", "Only account is accepted (one account key).");
+      if (typeof args.account !== "string" || !ACCOUNT_KEY.test(args.account))
+        return fail("invalid_argument", "account must be exactly one Claude or Codex key from list_accounts, such as claude3 or codex2.");
+      if (!ctx.getProviders()[args.account]) return fail("not_found", "No tracked account with that key. Use list_accounts.");
+      if (!ctx.refreshUsage) return fail("unavailable", "On-demand refresh is not available on this server.");
+      const refreshed = await ctx.refreshUsage(args.account);
+      if (!refreshed) return fail("not_found", "No tracked account with that key. Use list_accounts.");
+      return ok(refreshResult(args.account, refreshed, (ctx.now ?? Date.now)()));
     }
     return fail("unknown_tool", "Unknown tool.");
   } catch {

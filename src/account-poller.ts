@@ -56,6 +56,8 @@ export const ACCOUNT_TIMING = {
   rateLimitRelaxSec: envSec("ACCOUNT_429_RELAX_SECONDS", 3600),
   errorBaseSec: envSec("ACCOUNT_ERROR_BASE_SECONDS", 60),
   errorMaxSec: envSec("ACCOUNT_ERROR_MAX_SECONDS", 15 * 60),
+  /** On-demand refresh (MCP refresh_usage): minimum gap since the account's last check, scheduled or not. */
+  refreshMinSec: envSec("ACCOUNT_REFRESH_MIN_SECONDS", 60),
   // Shown data is at most 1-2 min old when checks succeed, so 3 min means checks are being
   // missed or slowed (429 backoff, errors); 30 min means the numbers can no longer be trusted.
   littleStaleSec: envSec("ACCOUNT_STALE_LITTLE_SECONDS", 3 * 60),
@@ -116,6 +118,20 @@ export interface AccountPollerHooks {
   spacer?: UpstreamSpacer;
 }
 
+/** Outcome of an on-demand refresh; never carries usage data or credentials. */
+export interface RefreshOutcome {
+  /** Whether an upstream check ran for this request (or a scheduled one in flight was joined). */
+  attempted: boolean;
+  attemptedAt: string | null;
+  ok: boolean;
+  error: string | null;
+  /** Why no check was sent: still in 429/error backoff, or too soon after the last check. */
+  skippedReason: "backoff" | "too_soon" | null;
+  /** Earliest time another on-demand check would be sent. */
+  retryAt: string | null;
+  minIntervalSec: number;
+}
+
 export function accountStaleness(fetchedAt: string | null, now = Date.now()): Staleness {
   const at = fetchedAt ? Date.parse(fetchedAt) : NaN;
   if (!Number.isFinite(at)) return "stale";
@@ -141,6 +157,7 @@ export class AccountPoller {
   /** Set by stop() (unlike `stopped`, which also covers "not started yet", e.g. a direct tick()). */
   private halted = false;
   private running = false;
+  private inFlight: Promise<void> | null = null;
   /** Consecutive 429s since the last success. */
   private rateLimited = 0;
   /** Slowdown level from 429s; decays one step per rateLimitRelaxSec of clean checks. */
@@ -259,7 +276,42 @@ export class AccountPoller {
     this.timer = setTimeout(() => void this.tick(), Math.max(0, at - this.now()));
   }
 
-  async tick() {
+  /**
+   * Run one active check now, through the same path as scheduled checks (shared spacer, 429 and
+   * error backoff). It never bypasses a backoff and never checks sooner than refreshMinSec after the
+   * last attempt; a scheduled check already in flight is joined instead of duplicated.
+   */
+  async refreshNow(minIntervalSec = ACCOUNT_TIMING.refreshMinSec): Promise<RefreshOutcome> {
+    const base = { minIntervalSec, skippedReason: null, retryAt: null } as const;
+    const outcome = (attemptedAt: string | null): RefreshOutcome => {
+      const ok = this.error === null && !!this.activeFetchedAt && !!attemptedAt && this.activeFetchedAt >= attemptedAt;
+      return { ...base, attempted: true, attemptedAt, ok, error: ok ? null : (this.error ?? "check did not complete") };
+    };
+    if (this.inFlight) {
+      await this.inFlight;
+      return outcome(this.lastAttemptAt);
+    }
+    const now = this.now();
+    if (this.backoffUntil > now)
+      return { ...base, attempted: false, attemptedAt: null, ok: false, error: this.error, skippedReason: "backoff", retryAt: new Date(this.backoffUntil).toISOString() };
+    const last = this.lastAttemptAt ? Date.parse(this.lastAttemptAt) : NaN;
+    if (Number.isFinite(last) && now - last < minIntervalSec * 1000)
+      return { ...base, attempted: false, attemptedAt: null, ok: false, error: null, skippedReason: "too_soon", retryAt: new Date(last + minIntervalSec * 1000).toISOString() };
+    if (this.timer) { clearTimeout(this.timer); this.timer = null; }
+    const before = this.lastAttemptAt;
+    await this.tick();
+    // stop() while waiting for the spacer (account removed): no check went out.
+    if (this.lastAttemptAt === before) return { ...base, attempted: false, attemptedAt: null, ok: false, error: "account is no longer polled" };
+    return outcome(this.lastAttemptAt);
+  }
+
+  tick(): Promise<void> {
+    if (this.inFlight) return this.inFlight;
+    this.inFlight = this.runTick().finally(() => { this.inFlight = null; });
+    return this.inFlight;
+  }
+
+  private async runTick() {
     this.running = true;
     // Wait for this account's turn first, and count the cadence from when the check really
     // starts, so accounts that queued behind each other stay spread out afterwards.

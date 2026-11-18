@@ -257,3 +257,61 @@ test("account staleness: fresh under 3 min, a little stale under 30 min, then st
   assert.equal(accountStaleness(iso(T0 - 30 * 60_000), T0), "stale");
   assert.equal(accountStaleness(null, T0), "stale");
 });
+
+// refresh_usage: on-demand checks go through the normal path and never bypass backoff or the minimum gap.
+test("refreshNow runs one check now and reports when it ran", async () => {
+  const reset = T0 + 5 * 86_400_000;
+  const p = make([week(10, reset), week(20, reset)]);
+  const r = await p.poller.refreshNow(60);
+  assert.deepEqual({ attempted: r.attempted, ok: r.ok, at: r.attemptedAt, skipped: r.skippedReason }, { attempted: true, ok: true, at: iso(T0), skipped: null });
+  assert.equal(p.calls.length, 1);
+  assert.equal(p.poller.snapshot().activeFetchedAt, iso(T0));
+  // Within the minimum gap: no upstream call, and the result says when the next one is allowed.
+  p.set(T0 + 30_000);
+  const soon = await p.poller.refreshNow(60);
+  assert.deepEqual({ attempted: soon.attempted, skipped: soon.skippedReason, retry: soon.retryAt }, { attempted: false, skipped: "too_soon", retry: iso(T0 + 60_000) });
+  assert.equal(p.calls.length, 1);
+  p.set(T0 + 61_000);
+  assert.equal((await p.poller.refreshNow(60)).ok, true);
+  assert.equal(p.calls.length, 2);
+});
+
+test("refreshNow reports a failed check and then respects the error backoff", async () => {
+  const p = make([new Error("claude usage via CLIProxyAPI HTTP 401")]);
+  const r = await p.poller.refreshNow(60);
+  assert.deepEqual({ attempted: r.attempted, ok: r.ok, error: r.error }, { attempted: true, ok: false, error: "claude usage via CLIProxyAPI HTTP 401" });
+  // Inside the error backoff, even with no minimum gap, nothing is sent.
+  p.set(T0 + 30_000);
+  const held = await p.poller.refreshNow(0);
+  assert.equal(held.attempted, false);
+  assert.equal(held.skippedReason, "backoff");
+  assert.equal(held.retryAt, iso(T0 + ACCOUNT_TIMING.errorBaseSec * 1000));
+  assert.equal(p.calls.length, 1);
+});
+
+test("refreshNow honors 429 Retry-After instead of calling again", async () => {
+  const p = make([new RateLimitError(900)]);
+  const r = await p.poller.refreshNow(60);
+  assert.equal(r.ok, false);
+  assert.match(r.error!, /rate-limited/);
+  p.set(T0 + 600_000);
+  const held = await p.poller.refreshNow(60);
+  assert.equal(held.skippedReason, "backoff");
+  assert.ok(Date.parse(held.retryAt!) >= T0 + 901_000);
+  assert.equal(p.calls.length, 1);
+});
+
+test("refreshNow joins a scheduled check already in flight instead of sending a second", async () => {
+  let release!: (v: unknown) => void;
+  const calls: number[] = [];
+  const poller = new AccountPoller("codex", "codex", () => { calls.push(1); return new Promise(r => { release = r; }); }, {}, () => T0);
+  const scheduled = poller.tick();
+  const joined = poller.refreshNow(60);
+  await new Promise(r => setImmediate(r));
+  release({ seven_day: { used_percent: 5 } });
+  await scheduled;
+  const r = await joined;
+  assert.equal(calls.length, 1);
+  assert.equal(r.ok, true);
+  assert.equal(r.attemptedAt, iso(T0));
+});

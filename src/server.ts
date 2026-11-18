@@ -10,6 +10,7 @@ import { assignAccounts } from "./accounts.js";
 import { CliProxyClient, CooldownError } from "./providers/cliproxy.js";
 import { RecentRequests, AccountActivityReader } from "./recent.js";
 import { installMcp } from "./mcp.js";
+import { fetchProxyModels } from "./proxy-models.js";
 import { RenewalStore, ExpiryStore, SEED_RENEWALS, installRenewals } from "./renewals.js";
 import { OAuthStore } from "../oauth/oauth-store.mjs";
 
@@ -396,6 +397,17 @@ const mcpEnabled = installMcp(app, {
       auth_file: cleared.auth_file, auth_index: cleared.auth_index, models_reset: cleared.models_reset.length }));
     return cleared;
   } } : {}),
+  ...(cliProxy ? { listModels: () => fetchProxyModels(process.env.CLIPROXYAPI_URL ?? "http://etzminisforumx1pro.lan:8317",
+    process.env.CLIPROXYAPI_CLIENT_KEY?.trim() || undefined) } : {}),
+  refreshUsage: async (key: string) => {
+    const account = accountPollers.get(key);
+    if (!account) return null;
+    const outcome = await account.poller.refreshNow();
+    console.log(JSON.stringify({ event: "usage_refresh", account: key, attempted: outcome.attempted, ok: outcome.ok,
+      skipped: outcome.skippedReason }));
+    const snapshot = currentProviders()[key];
+    return snapshot ? { outcome, snapshot } : null;
+  },
   getHistory: (granularity) => history.toSeries(granularity),
   getActivity: async (hours) => {
     if (!accountActivity) return null;

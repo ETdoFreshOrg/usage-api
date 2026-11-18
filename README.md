@@ -194,6 +194,8 @@ credits, change priorities or change any other CLIProxyAPI setting.
 | `suggest_account(provider?)` | Accounts ranked by room for more work (blocked last); an account with no weekly limit is ranked by its 24-hour window (`ranked_by`) |
 | `usage_history(account, days?, granularity?)` | Weekly (and 5-hour / 24-hour, where the account has them) % over time |
 | `recent_requests(hours?)` | Per-account request/error/token counts from CPA Manager, plus the latest 20 requests |
+| `list_models()` | Fresh `GET /v1/models` on CLIProxyAPI every call (not cached): model ids with owner/type, count, fetch time. Not a forced upstream catalog refresh. Needs `CLIPROXYAPI_CLIENT_KEY` |
+| `refresh_usage(account)` | One on-demand usage check for one account through its normal poller; returns when it ran, per-window observation times, and `fresh` / `stale` (with age and reason) / `unavailable`. Only reads usage |
 | `clear_proxy_cooldown(account)` | **Write.** Clears CPA's runtime cooldown / quota-exceeded routing state for exactly one account key; returns provider, auth file name, `auth_index` and cooldown state before/after. Use only when ET names the account |
 
 Sign-in uses the single-owner OAuth module shared with imessage-mcp and
@@ -221,6 +223,42 @@ out of quota goes back into cooldown on its next request. Uses the existing
 `CLIPROXYAPI_MANAGEMENT_KEY`; the key and tokens never appear in results or logs. Each
 call logs `mcp_tool_call` with the account and `proxy_cooldown_cleared` with the auth
 file and `auth_index`.
+
+### list_models
+
+`/v1/models` accepts only a client API key from CPA's `access.api-keys`, not the
+management key, so this tool reads `CLIPROXYAPI_CLIENT_KEY` from usage-api's env.
+Without it the tool answers `unavailable` and calls nothing. The key is sent only
+as the `Authorization` header and is redacted from any error text.
+
+There is deliberately no catalog-refresh tool. CPA v8.0.62 (4b3f2c7e) has
+`POST /v8/management/models/refresh` (same handler as
+`/v8/management/routing/model-definitions/refresh`, `RefreshModelDefinitions`). It
+re-downloads the remote catalogs, and when a provider's catalog changed, the model
+refresh callback (`sdk/cliproxy/service_plugins.go`, `registerModelRefreshCallback`)
+re-registers models and executors for every enabled credential of that provider and
+reconciles their model states, rebuilding per-auth availability "instead of
+preserving prior registry suppression state", and refreshes scheduler entries.
+That reaches into routing, so it is not a narrow model-list refresh. On its own,
+CPA loads the catalogs at startup (`StartModelCatalogUpdaters` in
+`service_lifecycle.go`), re-fetches them every `ModelsRefreshInterval` (3 h,
+`internal/registry/model_updater.go`), and reconfigures them on a config reload
+(`UpdateModelCatalogSources` in `service_config.go`). The deployed config has no
+`models:` section, so it uses the default remote catalogs.
+
+### refresh_usage
+
+Calls `AccountPoller.refreshNow()`, which runs the same check as a scheduled one
+(`tick()`: shared 5 s spacer, 429 and error backoff, Retry-After). It sends nothing
+while the account is in backoff or within `ACCOUNT_REFRESH_MIN_SECONDS` (60 s) of
+its last check, scheduled or on-demand; the result then gives `skipped_reason` and
+`next_allowed_at`. A scheduled check already in flight is joined, not duplicated.
+`freshness` is `fresh` only when this call's check succeeded. Otherwise it is
+`stale`, with the last values, each window's `observed_at` and age, and the poll
+error, or `unavailable` when there is no data. Passive CPA headers cover only the
+main windows (weekly, 5-hour, 24-hour); per-model windows date from the last active
+check. An all-accounts variant was left out: one call would queue up to 8 checks
+5 s apart.
 
 Per-account counts in `recent_requests` come from CPA Manager's
 `account_snapshot`; they are only served behind OAuth. The public
