@@ -15,17 +15,10 @@
  * usage-api still owns no Claude credential: 9router holds the OAuth account
  * and refreshes the token, and this module only reads it.
  */
-import { findConnection } from "./ninerouter.js";
-import { throwIfRateLimited } from "../cache.js";
-
-const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
-const PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
-const OAUTH_BETA = "oauth-2025-04-20";
-// Limit-reset grants ("cedar_ember") are only reported to a current Claude Code
-// CLI; other user agents get ineligible_reason "surface" / "cli_version".
-// ponytail: pinned version string; bump CLAUDE_CLI_VERSION when grants report cli_version.
-const RESETS_URL = `${USAGE_URL}?cedar_ember=1`;
-const CLI_USER_AGENT = `claude-cli/${process.env.CLAUDE_CLI_VERSION ?? "2.1.281"} (external, cli)`;
+// Read-only since 2026-11-20: usage-api no longer calls Anthropic. The usage and profile
+// endpoints (/api/oauth/usage, /api/oauth/profile) are not requested anywhere in this
+// service; quota numbers come from local state (see providers/local.ts). The parsers below
+// are kept for stored history and tests only.
 
 export interface ClaudeWindow {
   utilization: number;
@@ -239,16 +232,10 @@ export function parseClaudeUsage(
   };
 }
 
-// Subscription tier changes about never, so this is cached far beyond the
-// poll interval; a stale label is much cheaper than a round trip per tick.
-const PROFILE_TTL_MS = 30 * 60_000;
-
 interface AnthropicProfile {
   account?: { has_claude_max?: boolean; has_claude_pro?: boolean };
   organization?: { organization_type?: string; rate_limit_tier?: string };
 }
-
-const profileCache = new Map<string, { at: number; label: string | null }>();
 
 // Anthropic spreads the plan across three fields and none of them is a display
 // string: has_claude_max/has_claude_pro pick the family, while rate_limit_tier
@@ -267,56 +254,6 @@ export function planLabel(profile: AnthropicProfile): string | null {
   if (/enterprise/i.test(orgType)) return "Enterprise";
   if (/team/i.test(orgType)) return "Team";
   return null;
-}
-
-// The usage endpoint carries no tier at all, so the label needs this second
-// request. Best-effort: the tier is a label, never a measurement, so a
-// failure here degrades to the last known value (or null) rather than
-// failing the whole poll.
-async function fetchSubscriptionType(connectionId: string, token: string): Promise<string | null> {
-  const cached = profileCache.get(connectionId);
-  if (cached && Date.now() - cached.at < PROFILE_TTL_MS) return cached.label;
-  try {
-    const res = await fetch(PROFILE_URL, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "anthropic-beta": OAUTH_BETA,
-        Accept: "application/json",
-      },
-    });
-    if (!res.ok) return cached?.label ?? null;
-    const label = planLabel((await res.json()) as AnthropicProfile);
-    profileCache.set(connectionId, { at: Date.now(), label });
-    return label;
-  } catch {
-    return cached?.label ?? null;
-  }
-}
-
-export async function fetchClaudeUsage(account?: string): Promise<ClaudeUsage> {
-  const connection = findConnection("claude", account);
-  // One request: cedar_ember=1 adds the limit-reset grants to the normal usage body.
-  const res = await fetch(RESETS_URL, {
-    headers: {
-      Authorization: `Bearer ${connection.accessToken}`,
-      "anthropic-beta": OAUTH_BETA,
-      "User-Agent": CLI_USER_AGENT,
-      Accept: "application/json",
-    },
-  });
-  throwIfRateLimited(res);
-  if (!res.ok) {
-    throw new Error(`anthropic oauth/usage HTTP ${res.status} ${await res.text().catch(() => "")}`);
-  }
-  const json = (await res.json()) as RawUsageResponse & { cedar_ember?: RawResetGrants };
-  return {
-    ...parseClaudeUsage(
-      json,
-      await fetchSubscriptionType(connection.id, connection.accessToken),
-      parseClaudeResetCredits(json.cedar_ember),
-    ),
-    connection_id: connection.id,
-  };
 }
 
 /**

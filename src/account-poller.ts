@@ -1,36 +1,22 @@
 /**
- * Claude/Codex account poller. Two sources feed each account:
- *   - passive: the rate-limit headers CLIProxyAPI saw on the account's latest real
- *     request (see passive.ts), read from CPA's account listing every 15 s at no
- *     upstream cost;
- *   - active: a usage-endpoint check (one upstream GET per check through CPA's
- *     api-call; see providers/cliproxy.ts).
+ * Claude/Codex account reader. It makes no request to Anthropic or ChatGPT (ET, 2026-11-20:
+ * usage-api only reads quota state that already exists locally). Two local sources feed each
+ * account:
+ *   - proxy headers ("passive"): the rate-limit headers CLIProxyAPI saw on the account's latest
+ *     real request (see passive.ts), read from CPA's account listing every 15 s;
+ *   - stored state ("active", a name kept for clients): CPA Manager's quota snapshots and
+ *     auto-ping status (see providers/local.ts), re-read every ACCOUNT_IDLE_SECONDS (30 s).
  *
- * Active checks aim to keep shown data about a minute old:
- *   - an idle account (no new passive headers) is checked every
- *     ACCOUNT_IDLE_SECONDS_CODEX (60 s) / ACCOUNT_IDLE_SECONDS_CLAUDE (120 s),
- *     counted from whichever is newer: the last check or the passive data being
- *     shown. Idle checks also catch use outside CPA (claude.ai, direct CLI logins).
- *     Claude is slower because Anthropic's /api/oauth/usage 429s some accounts at
- *     60 s: on 2026-11-12 claude3 and claude4 were rate-limited after ~12 checks
- *     at 60 s, while 5-min checks had run clean;
- *   - an account in use through CPA, whose headers keep its weekly/5-hour numbers
- *     seconds old, is still checked every ACCOUNT_BUSY_SECONDS (5 min) for the
- *     fields headers lack (Fable/Design, Spark, reset credits);
- *   - runs once just after a known window reset;
- *   - checks from all accounts are spaced at least ACCOUNT_SPACING_SECONDS (5 s)
- *     apart (UpstreamSpacer), so the accounts spread across the minute instead of
- *     bursting, and stay spread because each cadence counts from its real start.
+ * Freshest wins: stored state carries its own observation time (`as_of`), and headers observed
+ * after it replace the windows they describe. `fetchedAt` is always the time the shown numbers
+ * were observed upstream by whoever observed them, never the time of a local read, so staleness
+ * is honest: little_stale from ACCOUNT_STALE_LITTLE_SECONDS (10 min, two missed auto-ping
+ * rounds) and stale from ACCOUNT_STALE_SECONDS (30 min).
  *
- * Backoff:
- *   - 429: the account's own cadence doubles (e.g. 2 min -> 4 min -> 8 min, at most
- *     ACCOUNT_429_MAX_INTERVAL_SECONDS, 15 min) and the next check waits that long,
- *     doubling again for consecutive 429s up to ACCOUNT_429_MAX_SECONDS (1 h), and
- *     never sooner than Retry-After. After ACCOUNT_429_RELAX_SECONDS (1 h) of clean
- *     checks the cadence halves again, back down to its provider's normal pace, so
- *     each account settles on the fastest pace its provider tolerates.
- *   - other errors: retry after ACCOUNT_ERROR_BASE_SECONDS (60 s) doubling, at most
- *     ACCOUNT_ERROR_MAX_SECONDS (15 min); the first success restores the normal pace.
+ * A local read that fails (CPA Manager down, nothing stored yet) is retried after
+ * ACCOUNT_ERROR_BASE_SECONDS (30 s) doubling to ACCOUNT_ERROR_MAX_SECONDS (2 min); the last
+ * numbers stay, with their real age. The 429 handling below is kept for a rate-limited local
+ * service; no provider is ever asked, so no provider limit applies.
  */
 import { RateLimitError, Staleness } from "./cache.js";
 import { describesAccountLimits, mergePassive, PassiveObservation } from "./passive.js";
@@ -39,12 +25,12 @@ const envSec = (name: string, fallback: number) => {
   const n = Number(process.env[name]);
   return Number.isFinite(n) && n > 0 ? n : fallback;
 };
-const IDLE_SEC = envSec("ACCOUNT_IDLE_SECONDS", 60);
+const IDLE_SEC = envSec("ACCOUNT_IDLE_SECONDS", 30);
 export const ACCOUNT_TIMING = {
   /** Normal check interval per provider family; other families use the plain default. */
-  idleSec: { default: IDLE_SEC, claude: envSec("ACCOUNT_IDLE_SECONDS_CLAUDE", Math.max(IDLE_SEC, 120)),
+  idleSec: { default: IDLE_SEC, claude: envSec("ACCOUNT_IDLE_SECONDS_CLAUDE", IDLE_SEC),
     codex: envSec("ACCOUNT_IDLE_SECONDS_CODEX", IDLE_SEC) } as Record<string, number>,
-  busySec: envSec("ACCOUNT_BUSY_SECONDS", 5 * 60),
+  busySec: envSec("ACCOUNT_BUSY_SECONDS", 60),
   /** Passive data younger than this means the account is in use through CPA (reported in intervalSec). */
   passiveFreshSec: envSec("ACCOUNT_PASSIVE_FRESH_SECONDS", 2 * 60),
   /** Delay after a known reset before checking, so the provider has rolled the window. */
@@ -54,13 +40,14 @@ export const ACCOUNT_TIMING = {
   rateLimitMaxIntervalSec: envSec("ACCOUNT_429_MAX_INTERVAL_SECONDS", 15 * 60),
   rateLimitMaxSec: envSec("ACCOUNT_429_MAX_SECONDS", 3600),
   rateLimitRelaxSec: envSec("ACCOUNT_429_RELAX_SECONDS", 3600),
-  errorBaseSec: envSec("ACCOUNT_ERROR_BASE_SECONDS", 60),
-  errorMaxSec: envSec("ACCOUNT_ERROR_MAX_SECONDS", 15 * 60),
+  errorBaseSec: envSec("ACCOUNT_ERROR_BASE_SECONDS", 30),
+  errorMaxSec: envSec("ACCOUNT_ERROR_MAX_SECONDS", 2 * 60),
   /** On-demand refresh (MCP refresh_usage): minimum gap since the account's last check, scheduled or not. */
-  refreshMinSec: envSec("ACCOUNT_REFRESH_MIN_SECONDS", 60),
-  // Shown data is at most 1-2 min old when checks succeed, so 3 min means checks are being
-  // missed or slowed (429 backoff, errors); 30 min means the numbers can no longer be trusted.
-  littleStaleSec: envSec("ACCOUNT_STALE_LITTLE_SECONDS", 3 * 60),
+  refreshMinSec: envSec("ACCOUNT_REFRESH_MIN_SECONDS", 10),
+  // An account in use has seconds-old headers; an idle one is as old as CPA Manager's last
+  // auto-ping check (every 5 min). 10 min means two rounds were missed; 30 min means the numbers
+  // can no longer be trusted.
+  littleStaleSec: envSec("ACCOUNT_STALE_LITTLE_SECONDS", 10 * 60),
   staleSec: envSec("ACCOUNT_STALE_SECONDS", 30 * 60),
 };
 
@@ -107,6 +94,8 @@ export interface AccountSnapshot {
   rateLimitLevel: number;
   /** Time of the latest 429 from the provider, if any since start. */
   lastRateLimitedAt: string | null;
+  /** Local state says the sign-in was rejected (expired or revoked). Reported only; nothing is retried upstream. */
+  loginExpired: boolean;
 }
 
 export interface AccountPollerHooks {
@@ -172,8 +161,12 @@ export class AccountPoller {
   active: unknown = null;
   activeFetchedAt: string | null = null;
   lastAttemptAt: string | null = null;
+  /** Time of the last local read that returned data (the data itself may be older; see activeFetchedAt). */
+  private lastReadOkAt: string | null = null;
   error: string | null = null;
   observation: PassiveObservation | null = null;
+  /** Set from local state by the account sync (proxy credential status, auto-ping's last answer). */
+  loginExpired = false;
 
   constructor(
     public readonly name: string,
@@ -284,7 +277,7 @@ export class AccountPoller {
   async refreshNow(minIntervalSec = ACCOUNT_TIMING.refreshMinSec): Promise<RefreshOutcome> {
     const base = { minIntervalSec, skippedReason: null, retryAt: null } as const;
     const outcome = (attemptedAt: string | null): RefreshOutcome => {
-      const ok = this.error === null && !!this.activeFetchedAt && !!attemptedAt && this.activeFetchedAt >= attemptedAt;
+      const ok = this.error === null && !!this.lastReadOkAt && !!attemptedAt && this.lastReadOkAt >= attemptedAt;
       return { ...base, attempted: true, attemptedAt, ok, error: ok ? null : (this.error ?? "check did not complete") };
     };
     if (this.inFlight) {
@@ -321,8 +314,12 @@ export class AccountPoller {
     this.lastAttemptAt = new Date(this.now()).toISOString();
     try {
       const data = await this.fetcher();
-      const at = new Date(this.now());
+      // Stored state says when its numbers were observed (`as_of`); that, not the time of this
+      // local read, is the data's age.
+      const asOf = Date.parse((data as { as_of?: unknown } | null)?.as_of as string);
+      const at = new Date(Number.isFinite(asOf) ? Math.min(asOf, this.now()) : this.now());
       this.active = data;
+      this.lastReadOkAt = new Date(this.now()).toISOString();
       this.activeFetchedAt = at.toISOString();
       this.error = null;
       this.rateLimited = 0;
@@ -379,6 +376,7 @@ export class AccountPoller {
       nextFetchAt: this.nextAt.toISOString(),
       rateLimitLevel: this.rateLimitLevel,
       lastRateLimitedAt: this.lastRateLimitAt ? new Date(this.lastRateLimitAt).toISOString() : null,
+      loginExpired: this.loginExpired,
     };
   }
 }

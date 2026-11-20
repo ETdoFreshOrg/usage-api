@@ -36,8 +36,8 @@ try {
 } catch (err: any) {
   if (err?.code !== "ENOENT") console.warn(`could not read ${ENV_FILE}: ${err?.message ?? err}`);
 }
-import { fetchClaudeUsage, openFiveHour } from "./providers/anthropic.js";
-import { fetchCodexUsage } from "./providers/codex.js";
+import { openFiveHour } from "./providers/anthropic.js";
+import { ManagerClient, ManagerAccount, LocalState, buildLocalUsage, loginRejected } from "./providers/local.js";
 import { CodexWindow, reclassifyCodexWindows } from "./codex-windows.js";
 import { listConnections } from "./providers/ninerouter.js";
 import { fetchZaiUsage } from "./providers/zai.js";
@@ -119,14 +119,9 @@ const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY ?? process.env.OPENROUTER_
 const OPENAI_KEY = process.env.OPENAI_ADMIN_KEY; // requires sk-admin-* — keep explicit
 const OPENROUTER_MANAGEMENT_KEY = process.env.OPENROUTER_MANAGEMENT_KEY;
 
-// All Claude/Codex account resolution now goes through ET's 9router, which
-// owns the OAuth-authenticated accounts and keeps their tokens refreshed.
-// usage-api borrows the current token and calls Anthropic/OpenAI directly —
-// see providers/ninerouter.js.
-//
-// An account is named by whichever identifier 9router records for it:
-// Codex connections carry an email, Claude ones may only have a display
-// name ("Account 1").
+// Claude/Codex accounts are the credentials on CLIProxyAPI. usage-api holds no provider token
+// and makes no request to Anthropic or ChatGPT: account numbers are read from local state only
+// (CLIProxyAPI's account list and CPA Manager; see providers/local.ts).
 const CLAUDE_ACCOUNT = process.env.CLIPROXYAPI_CLAUDE_EMAIL?.trim() || process.env.NINEROUTER_CLAUDE_ACCOUNT?.trim() || undefined;
 const CLAUDE2_ACCOUNT = process.env.CLIPROXYAPI_CLAUDE2_EMAIL?.trim() || process.env.NINEROUTER_CLAUDE2_ACCOUNT?.trim() || undefined;
 const CODEX_ACCOUNT = process.env.NINEROUTER_CODEX_ACCOUNT?.trim() || "etdofresh@gmail.com";
@@ -158,15 +153,34 @@ const EXPIRIES_FILE = process.env.USAGE_EXPIRIES_FILE ?? path.join(path.dirname(
 const expiries = new ExpiryStore(EXPIRIES_FILE, process.env.RENEWAL_TIME_ZONE?.trim() || undefined);
 await expiries.load();
 
+const MANAGER_URL = process.env.CPA_MANAGER_URL ?? "http://etzminisforumx1pro.lan:18317";
+// Stored quota state (auto-ping results, saved snapshots). Reads only; see providers/local.ts.
+const manager = process.env.CPA_MANAGER_KEY ? new ManagerClient(MANAGER_URL, process.env.CPA_MANAGER_KEY) : null;
+let managerAccounts: ManagerAccount[] = [];
+let localState: LocalState | null = null;
+const SIGN_IN_EXPIRED = "sign-in expired on the proxy; sign in again there (nothing is retried upstream)";
+async function readLocalUsage(id: string): Promise<unknown> {
+  if (!manager) throw new Error("no local quota source: CPA Manager is not configured (CPA_MANAGER_KEY)");
+  const account = managerAccounts.find(a => a.id === id);
+  if (!account) throw new Error("CLIProxyAPI account is no longer active");
+  localState = await manager.state(managerAccounts);
+  const data = buildLocalUsage(account, localState);
+  if (!data) throw new Error("no stored quota data for this account yet (not in use and not on auto-ping)");
+  return data;
+}
+
 const ACCOUNTS_FILE = path.join(path.dirname(HISTORY_FILE), "usage-accounts.json");
 let assignments: Record<string, string> = {};
 try { assignments = JSON.parse(await fs.readFile(ACCOUNTS_FILE, "utf8")); }
 catch (err: any) { if (err?.code !== "ENOENT") throw err; }
 const accountPollers = new Map<string, { connectionId: string; name: string; family: string; priority: number | null; poller: AccountPoller }>();
-// One spacer for every account: all checks leave through the same CPA host, so keep them apart.
-const upstreamSpacer = new UpstreamSpacer();
+// Reads are local and share one cached CPA Manager answer, so they need no spacing.
+const upstreamSpacer = new UpstreamSpacer(0);
 async function syncAccounts() {
-  const connections = cliProxy ? await cliProxy.listAccounts() : listConnections();
+  // Without CLIProxyAPI there is no local source of account state, so no accounts are tracked.
+  const connections = cliProxy ? await cliProxy.listAccounts() : [];
+  managerAccounts = connections.map(c => ({ id: c.id, provider: c.provider, email: c.email, fileName: c.fileName,
+    authIndex: c.authIndex, accountId: c.accountId }));
   const next = assignAccounts(connections, assignments, {
     claude: CLAUDE_ACCOUNT, claude2: CLAUDE2_ACCOUNT, codex: CODEX_ACCOUNT, codex2: CODEX2_ACCOUNT,
   });
@@ -179,26 +193,29 @@ async function syncAccounts() {
     const connection = connections.find(c => c.id === id);
     if (!connection || (key === "claude2" && CLAUDE2_OFF) || (key === "codex2" && CODEX2_OFF)) continue;
     active.add(key);
-    const priority = "priority" in connection ? connection.priority : null;
-    const observation = "observation" in connection ? connection.observation : null;
+    const priority = connection.priority;
+    const observation = connection.observation;
+    // Expired sign-ins are read from local state (proxy credential status, auto-ping's last answer).
+    const expired = loginRejected(connection.loginExpired, connection.fileName ? localState?.autoPing.get(connection.fileName) : undefined);
     const existing = accountPollers.get(key);
     if (existing) {
       existing.name = connection.email ?? connection.name;
       existing.priority = priority;
+      existing.poller.loginExpired = expired;
       existing.poller.observe(observation);
       continue;
     }
     const family = connection.provider;
-    // Active usage-endpoint checks about once a minute, plus passive CPA headers (see account-poller.ts).
-    const poller = new AccountPoller(key, family,
-      () => cliProxy ? cliProxy.fetchUsage(id) : family === "claude" ? fetchClaudeUsage(id) : fetchCodexUsage(id),
+    // Local reads only: CPA Manager's stored state, plus the proxy's headers (see account-poller.ts).
+    const poller = new AccountPoller(key, family, () => readLocalUsage(id),
       { onActive: remember(key), onPassive: (data, at) => recordHistory(key, data, at), spacer: upstreamSpacer });
+    poller.loginExpired = expired;
     const last = lastGood[key];
     if (last) poller.seed(last.data, last.fetchedAt);
     poller.observe(observation);
     accountPollers.set(key, { connectionId: id, name: connection.email ?? connection.name, family, priority, poller });
-    // Stagger first checks so a restart does not hit every account at once.
-    poller.start(5 * (accountPollers.size - 1));
+    // Reads are local and share one cached CPA Manager answer, so every account starts at once.
+    poller.start();
   }
   for (const [key, account] of accountPollers) {
     if (!active.has(key)) { account.poller.stop(); accountPollers.delete(key); }
@@ -271,7 +288,8 @@ function enrichClaude(snap: { data?: any }) {
     data: {
       ...d,
       five_hour: f ? { ...f, ...pacing(f.utilization, f.resets_at, FIVE_HOUR_MS) } : null,
-      seven_day: enrichSeven(d.seven_day ?? { utilization: 0, resets_at: null }),
+      // No weekly number from any local source stays null; it is never shown as 0%.
+      seven_day: enrichSeven(d.seven_day ?? null),
       seven_day_sonnet: enrichSeven(d.seven_day_sonnet),
       seven_day_opus: enrichSeven(d.seven_day_opus),
       seven_day_design: enrichSeven(d.seven_day_design),
@@ -348,10 +366,11 @@ function currentProviders(): Record<string, any> {
     const snapshot = account.poller.snapshot();
     providers[key] = {
       ...snapshot, data: enrichProviderData(key, snapshot.data),
+      ...(snapshot.loginExpired ? { error: SIGN_IN_EXPIRED } : {}),
       account: { id: account.connectionId, name: account.name, family: account.family, priority: account.priority },
       renewal: renewals.resolve(key, (snapshot.data as any)?.subscription),
       expiry: expiries.resolve(key, (snapshot.data as any)?.subscription),
-      source: cliProxy ? "cliproxyapi" : "9router",
+      source: "local",
     };
   }
   providers.zai = zai ? enrichZai(zai.snapshot()) : { data: null, error: "ZAI_API_KEY not set" };

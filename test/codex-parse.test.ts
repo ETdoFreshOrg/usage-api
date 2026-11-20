@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { RateLimitError } from "../src/cache.ts";
-import { createCodexUsageFetcher, parseCodexUsage, parseResetCredits } from "../src/providers/codex.ts";
+import { parseCodexUsage, parseResetCredits } from "../src/providers/codex.ts";
 import { codexWindowSlot, reclassifyCodexWindows } from "../src/codex-windows.ts";
 import type { RouterConnection } from "../src/providers/ninerouter.ts";
 
@@ -37,100 +37,6 @@ function headersOf(init?: RequestInit): Headers {
 
 // Without the account header OpenAI reports an empty account context, which
 // showed 100% used on the seven-day window while the Pro workspace was at 60%.
-test("Codex usage names the ChatGPT account from 9router", async () => {
-  let sent: string | null = null;
-  const fetcher = createCodexUsageFetcher({
-    resolveConnection: () => ({ ...connection("token"), accountId: "acct-123" }),
-    fetchImpl: (async (_input, init) => {
-      sent = headersOf(init).get("ChatGPT-Account-ID");
-      return usageResponse();
-    }) as typeof fetch,
-  });
-  await fetcher();
-  assert.equal(sent, "acct-123");
-});
-
-// 9router owns the OAuth account and refreshes the token; usage-api must send
-// whatever token the connection store currently holds, without caching one of
-// its own across calls.
-test("Codex usage is requested with the token 9router currently holds", async () => {
-  const seen: string[] = [];
-  let current = "first-token";
-  const fetcher = createCodexUsageFetcher({
-    resolveConnection: (account) => {
-      assert.equal(account, "etdofresh@gmail.com");
-      return connection(current);
-    },
-    fetchImpl: (async (_input, init) => {
-      seen.push(String(headersOf(init).get("Authorization")));
-      return usageResponse();
-    }) as typeof fetch,
-  });
-
-  await fetcher("etdofresh@gmail.com");
-  current = "rotated-token";
-  await fetcher("etdofresh@gmail.com");
-
-  assert.deepEqual(seen, ["Bearer first-token", "Bearer rotated-token"]);
-});
-
-// The usage response already carries the count, so the detail request only
-// earns its keep when there is a credit to describe.
-test("reset-credit detail is skipped when the usage response reports none available", async () => {
-  const urls: string[] = [];
-  const fetcher = createCodexUsageFetcher({
-    resolveConnection: () => connection("token"),
-    fetchImpl: (async (input) => {
-      urls.push(String(input));
-      return usageResponse({ rate_limit_reset_credits: { available_count: 0 } });
-    }) as typeof fetch,
-  });
-
-  const usage = await fetcher();
-
-  assert.deepEqual(urls, ["https://chatgpt.com/backend-api/wham/usage"]);
-  assert.deepEqual(usage.reset_credits, { available_count: 0, next_expires_at: null, credits: [] });
-});
-
-test("reset-credit detail is fetched when the usage response reports credits", async () => {
-  const urls: string[] = [];
-  const fetcher = createCodexUsageFetcher({
-    resolveConnection: () => connection("token"),
-    fetchImpl: (async (input) => {
-      const url = String(input);
-      urls.push(url);
-      if (url.endsWith("/rate-limit-reset-credits")) {
-        return new Response(JSON.stringify({
-          available_count: 1,
-          credits: [{ status: "available", granted_at: "2026-09-01T00:00:00Z", expires_at: "2026-09-30T00:00:00Z" }],
-        }), { headers: { "Content-Type": "application/json" } });
-      }
-      return usageResponse({ rate_limit_reset_credits: { available_count: 1 } });
-    }) as typeof fetch,
-  });
-
-  const usage = await fetcher();
-
-  assert.equal(urls.length, 2);
-  assert.equal(usage.reset_credits?.available_count, 1);
-  assert.equal(usage.reset_credits?.next_expires_at, "2026-09-30T00:00:00Z");
-});
-
-// A 429 must reach the poller as a RateLimitError so it backs off rather than
-// hammering OpenAI on the next tick.
-test("a rate-limited usage response surfaces Retry-After to the poller", async () => {
-  const fetcher = createCodexUsageFetcher({
-    resolveConnection: () => connection("token"),
-    fetchImpl: (async () => new Response("", { status: 429, headers: { "retry-after": "120" } })) as typeof fetch,
-  });
-
-  await assert.rejects(fetcher(), (err: unknown) => {
-    assert.ok(err instanceof RateLimitError);
-    assert.equal(err.retryAfterSec, 120);
-    return true;
-  });
-});
-
 test("parseCodexUsage classifies the normal 5-hour and 7-day windows by duration", () => {
   const parsed = parseCodexUsage({
     plan_type: "pro",

@@ -16,12 +16,11 @@
  * usage-api owns no Codex credential: 9router holds the OAuth account and
  * refreshes the token, and this module only reads it.
  */
-import { throwIfRateLimited } from "../cache.js";
+// Read-only since 2026-11-20: usage-api no longer calls ChatGPT. wham/usage,
+// wham/rate-limit-reset-credits and accounts/check are not requested anywhere in this
+// service; quota numbers come from local state (see providers/local.ts). The parsers below
+// are kept for stored history and tests only.
 import { classifyCodexWindows, CodexWindow, CodexWindows } from "../codex-windows.js";
-import { findConnection, RouterConnection } from "./ninerouter.js";
-
-const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
-const RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 
 export type { CodexWindow } from "../codex-windows.js";
 
@@ -143,72 +142,12 @@ export function parseResetCredits(json: RawResetCreditsResponse): CodexResetCred
   };
 }
 
-// Without ChatGPT-Account-ID, wham/usage answers for an empty account context
-// (account_id "") that can read 100% used while the real workspace has quota.
-function authHeaders(token: string, accountId?: string | null): Record<string, string> {
-  return {
-    Authorization: `Bearer ${token}`,
-    "User-Agent": "codex-cli",
-    Accept: "application/json",
-    ...(accountId ? { "ChatGPT-Account-ID": accountId } : {}),
-  };
-}
-
-export interface CodexUsageFetcherOptions {
-  fetchImpl?: typeof fetch;
-  resolveConnection?: (account?: string) => RouterConnection;
-}
-
-export function createCodexUsageFetcher(
-  options: CodexUsageFetcherOptions = {},
-): (account?: string) => Promise<CodexUsage> {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const resolve = options.resolveConnection ?? ((account?: string) => findConnection("codex", account));
-
-  // The usage response already reports how many resets are available, so the
-  // detail call is only worth making when there is at least one to describe.
-  async function fetchResetCredits(headers: Record<string, string>, availableCount: number): Promise<CodexResetCredits | null> {
-    if (availableCount <= 0) {
-      return { available_count: availableCount, next_expires_at: null, credits: [] };
-    }
-    try {
-      const res = await fetchImpl(RESET_CREDITS_URL, { headers });
-      if (!res.ok) return null;
-      return parseResetCredits((await res.json()) as RawResetCreditsResponse);
-    } catch {
-      return null;
-    }
-  }
-
-  return async function fetchCodexUsage(account?: string): Promise<CodexUsage> {
-    const connection = resolve(account);
-    const headers = authHeaders(connection.accessToken, connection.accountId);
-    const res = await fetchImpl(USAGE_URL, { headers });
-    throwIfRateLimited(res);
-    if (!res.ok) {
-      throw new Error(`codex usage HTTP ${res.status} ${await res.text().catch(() => "")}`);
-    }
-    const json = (await res.json()) as RawCodexUsageResponse;
-    return {
-      ...parseCodexUsage(json),
-      reset_credits: await fetchResetCredits(
-        headers,
-        json.rate_limit_reset_credits?.available_count ?? 0,
-      ),
-    };
-  };
-}
-
-export const fetchCodexUsage = createCodexUsageFetcher();
-
 // --- Subscription state ------------------------------------------------------
-// GET chatgpt.com/backend-api/accounts/check/v4-2023-04-27 (the call the
-// ChatGPT web app makes) reports the plan's end and whether it renews:
+// ChatGPT's accounts/check body (no longer requested by usage-api) reports the plan's end and whether it renews:
 //   entitlement: has_active_subscription, expires_at, renews_at, cancels_at, billing_period
 //   last_active_subscription: will_renew (false once cancelled), cancellation_outcome
 // Checked live 2026-11-13: a cancelled account read will_renew false,
 // cancellation_outcome "deactivate", cancels_at null, expires_at = end of the paid month.
-export const ACCOUNTS_CHECK_URL = "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27";
 
 export interface CodexSubscription {
   source: "chatgpt";

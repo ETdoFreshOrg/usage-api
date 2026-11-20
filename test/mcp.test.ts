@@ -359,7 +359,7 @@ test("refresh_usage: a failed check returns the last values as stale with their 
   assert.equal(r.windows.weekly.age_minutes, 10);
   assert.equal(r.windows.weekly_fable.observed_at, hoursFromNow(-2));
   assert.equal(r.windows.weekly_fable.age_minutes, 120);
-  assert.match(r.note, /Not refreshed/);
+  assert.match(r.note, /nothing newer/);
   // Skipped for backoff or the minimum gap: also stale, with when the next check is allowed.
   const skipped = { ...OUT, attempted: false, attemptedAt: null, ok: false, skippedReason: "too_soon", retryAt: hoursFromNow(0.01) };
   const s: any = (await callTool("refresh_usage", { account: "claude" }, refreshCtx(skipped, { ...snap, dataSource: "active", fetchedAt: hoursFromNow(-0.005), activeFetchedAt: hoursFromNow(-0.005) }))).structuredContent;

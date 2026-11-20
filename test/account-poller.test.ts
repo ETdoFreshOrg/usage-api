@@ -6,7 +6,11 @@ import { RateLimitError } from "../src/cache.js";
 const T0 = Date.parse("2026-11-03T12:00:00Z");
 // Shipped per-provider cadences; the tests below run Claude accounts at 60 s like Codex.
 const SHIPPED_IDLE = { ...ACCOUNT_TIMING.idleSec };
-ACCOUNT_TIMING.idleSec.claude = 60;
+const SHIPPED = { ...ACCOUNT_TIMING };
+// The scheduling rules below are exercised at the timings they were written for; the shipped
+// (local-read) values are asserted separately.
+Object.assign(ACCOUNT_TIMING.idleSec, { default: 60, claude: 60, codex: 60 });
+Object.assign(ACCOUNT_TIMING, { busySec: 300, errorBaseSec: 60, errorMaxSec: 900, refreshMinSec: 60 });
 const iso = (ms: number) => new Date(ms).toISOString();
 
 function make(results: Array<unknown | Error>, family = "claude", spacer?: UpstreamSpacer, clock?: { now: number }) {
@@ -59,9 +63,40 @@ test("an account that stops being used is re-checked 60 s after its last headers
   p.poller.stop();
 });
 
-test("shipped cadence: Codex every 60 s, Claude every 120 s (Anthropic 429s some accounts at 60 s)", () => {
-  assert.equal(SHIPPED_IDLE.codex, 60);
-  assert.equal(SHIPPED_IDLE.claude, 120);
+test("shipped cadence: local state is re-read every 30 s for both providers, 60 s while headers arrive", () => {
+  assert.equal(SHIPPED_IDLE.codex, 30);
+  assert.equal(SHIPPED_IDLE.claude, 30);
+  assert.equal(SHIPPED.busySec, 60);
+  assert.equal(SHIPPED.errorBaseSec, 30);
+  assert.equal(SHIPPED.errorMaxSec, 120);
+});
+
+test("stored state is aged from its own as_of, not from the time it was read", async () => {
+  const reset = T0 + 5 * 86_400_000;
+  const p = make([{ ...week(40, reset), as_of: iso(T0 - 7 * 60_000) }]);
+  await p.poller.tick();
+  const snap = p.poller.snapshot();
+  assert.equal(snap.fetchedAt, iso(T0 - 7 * 60_000));
+  assert.equal(snap.ageSec, 7 * 60);
+  // Headers seen after that observation win; headers seen before it do not.
+  p.poller.observe(obs(T0 - 8 * 60_000, 0.9, reset));
+  assert.equal((p.poller.snapshot().data as any).seven_day.utilization, 40);
+  p.poller.observe(obs(T0 - 60_000, 0.5, reset));
+  const merged = p.poller.snapshot();
+  assert.equal(merged.dataSource, "passive");
+  assert.equal((merged.data as any).seven_day.utilization, 50);
+  assert.equal((merged.data as any).seven_day.as_of, iso(T0 - 60_000));
+  assert.equal(merged.fetchedAt, iso(T0 - 60_000));
+  p.poller.stop();
+});
+
+test("an expired sign-in is reported from local state and changes nothing about reads", async () => {
+  const p = make([week(10, T0 + 86_400_000)]);
+  p.poller.loginExpired = true;
+  await p.poller.tick();
+  assert.equal(p.poller.snapshot().loginExpired, true);
+  assert.equal(p.calls.length, 1);
+  p.poller.stop();
 });
 
 test("per-provider idle intervals apply to their own family only", async () => {
@@ -250,9 +285,9 @@ test("an account stopped while waiting for its turn skips the check", async () =
   assert.equal(p.poller.snapshot().lastAttemptAt, null);
 });
 
-test("account staleness: fresh under 3 min, a little stale under 30 min, then stale", () => {
-  assert.equal(accountStaleness(iso(T0 - 179_000), T0), "fresh");
-  assert.equal(accountStaleness(iso(T0 - 3 * 60_000), T0), "little_stale");
+test("account staleness: fresh under 10 min, a little stale under 30 min, then stale", () => {
+  assert.equal(accountStaleness(iso(T0 - 599_000), T0), "fresh");
+  assert.equal(accountStaleness(iso(T0 - 10 * 60_000), T0), "little_stale");
   assert.equal(accountStaleness(iso(T0 - 29 * 60_000), T0), "little_stale");
   assert.equal(accountStaleness(iso(T0 - 30 * 60_000), T0), "stale");
   assert.equal(accountStaleness(null, T0), "stale");

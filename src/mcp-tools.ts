@@ -109,7 +109,7 @@ export const tools = [
   },
   {
     name: "refresh_usage",
-    description: "Fetch fresh quota usage (weekly, 5-hour, 24-hour and per-model %) for exactly one Claude or Codex account now, instead of waiting for the next scheduled check, using usage-api's normal poller and existing provider access. It only FETCHES usage: it does not use or redeem reset credits, reset any provider quota, or touch CLIProxyAPI cooldown or routing. It respects usage-api's rate limits: no check is sent while the account is in 429/error backoff or within the minimum interval since its last check; the result then says why and when a check is next allowed. Returns when this poll ran, when each window was last successfully observed, and freshness: fresh only if this call's check succeeded; otherwise the last known values marked stale with their age and the error, or unavailable if there are none. One account per call; no batch or wildcard.",
+    description: "Re-read one Claude or Codex account's quota usage (weekly, 5-hour, 24-hour %) from local state now, instead of waiting for the next scheduled read. usage-api never asks Anthropic or ChatGPT for usage: the numbers come from what CLIProxyAPI saw on the account's latest real request and from what CPA Manager's auto-ping last recorded, so this cannot make them newer than those sources are. It does not use or redeem reset credits, reset any provider quota, or touch CLIProxyAPI cooldown or routing. Returns when the read ran, when each window was observed and by which source, and freshness: fresh only if the numbers are recent; otherwise the last known values marked stale with their age, or unavailable if there are none. One account per call; no batch or wildcard.",
     inputSchema: { type: "object", additionalProperties: false, required: ["account"], properties: {
       account: { type: "string", pattern: "^(claude|codex)\\d*$", description: "Exactly one account key from list_accounts, such as claude3 or codex2." },
     } },
@@ -138,6 +138,8 @@ function windowSummary(w: any, now: number) {
     // Where an even burn across the window would be by now; positive pace_slack = under pace.
     expected_percent: expected === null ? null : round(expected),
     pace_slack: num(w.slack) === null ? null : round(w.slack),
+    // When this number was observed and where it was read from (proxy_headers, manager_snapshot, auto_ping).
+    ...(typeof w.as_of === "string" ? { observed_at: w.as_of, source: typeof w.source === "string" ? w.source : null } : {}),
   };
 }
 
@@ -213,7 +215,8 @@ const MAIN_WINDOWS = new Set(["weekly", "five_hour", "one_day"]);
 export function refreshResult(key: string, { outcome, snapshot }: UsageRefresh, now: number) {
   const summary = summarizeAccount(key, snapshot, now);
   const hasData = snapshot.data != null;
-  const freshness = outcome.ok ? "fresh" : hasData ? "stale" : "unavailable";
+  // A local read always "works"; the numbers are fresh only if their own observation time is recent.
+  const freshness = !hasData ? "unavailable" : outcome.ok && (snapshot.staleness ?? "fresh") === "fresh" ? "fresh" : "stale";
   // Passive data (CPA request headers) covers only the main windows; the rest come from the last active check.
   const observedAt = (window: string) => snapshot.dataSource === "passive" && MAIN_WINDOWS.has(window)
     ? snapshot.observedAt ?? null : snapshot.activeFetchedAt ?? snapshot.fetchedAt ?? null;
@@ -222,7 +225,7 @@ export function refreshResult(key: string, { outcome, snapshot }: UsageRefresh, 
   if (hasData) {
     for (const name of ["weekly", "five_hour", "one_day"] as const) {
       const w = (summary as any)[name];
-      if (w) windows[name] = { ...w, observed_at: observedAt(name), age_minutes: at(observedAt(name)) };
+      if (w) { const seen = w.observed_at ?? observedAt(name); windows[name] = { ...w, observed_at: seen, age_minutes: at(seen) }; }
     }
     for (const [model, w] of Object.entries((summary as any).weekly_by_model ?? {}))
       windows[`weekly_${model}`] = { ...(w as object), observed_at: observedAt(model), age_minutes: at(observedAt(model)) };
@@ -241,9 +244,9 @@ export function refreshResult(key: string, { outcome, snapshot }: UsageRefresh, 
     plan: summary.plan,
     reset_credits: summary.reset_credits,
     note: freshness === "fresh"
-      ? "Fetched just now. Usage was only read: no reset credit was used, no quota was reset, and proxy cooldowns were not touched."
+      ? "Read from local state just now (no provider was asked); see each window's observed_at for how old its number is. Nothing was reset and proxy cooldowns were not touched."
       : freshness === "stale"
-        ? "Not refreshed by this call (see poll); these are the last known values, with their age. Usage was only read; nothing was reset."
+        ? "Local state has nothing newer (see poll); these are the last known values, with their age. No provider was asked; nothing was reset."
         : "No usage data is available for this account yet, and this call did not get any (see poll).",
   };
 }

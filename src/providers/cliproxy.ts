@@ -1,7 +1,5 @@
-import { RateLimitError, throwIfRateLimited } from "../cache.js";
+import { throwIfRateLimited } from "../cache.js";
 import { PassiveObservation, readObservation } from "../passive.js";
-import { parseClaudeUsage, parseClaudeResetCredits, planLabel, hasWeeklyWindow, claudeSubscription, ClaudeSubscription } from "./anthropic.js";
-import { parseCodexUsage, parseResetCredits, parseCodexSubscription, CodexSubscription, ACCOUNTS_CHECK_URL } from "./codex.js";
 
 export interface ProxyAccount {
   id: string;
@@ -14,12 +12,31 @@ export interface ProxyAccount {
   priority: number | null;
   /** Rate-limit headers from the account's latest request through CPA (see passive.ts). */
   observation: PassiveObservation | null;
+  /** CPA credential file name; identifies the account to CPA Manager (see local.ts). */
+  fileName: string | null;
+  /** Whether CPA reports the sign-in as rejected (expired or revoked refresh token). Read from its status only. */
+  loginExpired: boolean;
 }
 
 type AuthFile = {
   id?: string; name?: string; provider?: string; type?: string; email?: string;
   auth_index?: string; disabled?: boolean; id_token?: unknown; priority?: unknown; quota?: unknown;
+  status?: unknown; status_message?: unknown;
 };
+
+/** CPA marks a credential whose refresh token was rejected "unauthorized (refresh token invalid)". */
+export function loginExpired(file: { status_message?: unknown }): boolean {
+  return typeof file.status_message === "string" && /unauthori[sz]ed|invalid_grant|refresh token/i.test(file.status_message);
+}
+
+/**
+ * Management paths this client may call. CPA's `api-call` sends an arbitrary request upstream
+ * with an account's token; usage-api must never use it (ET, 2026-11-20: no outbound quota calls).
+ */
+export function assertLocalManagementPath(path: string) {
+  if (/^\/?api-call(\/|\?|$)/.test(path) || /requests\/api-call/.test(path))
+    throw new Error("usage-api does not call CLIProxyAPI's api-call (no upstream requests)");
+}
 
 // CPA omits priority when it was never set; a numeric string is accepted in case a build serializes it that way.
 function priorityOf(value: unknown): number | null {
@@ -84,25 +101,15 @@ function accountId(value: unknown): string | null {
   } catch { return null; }
 }
 
-// The plan tier almost never changes; re-reading it costs an extra upstream call per check.
-const PROFILE_TTL_MS = 12 * 3_600_000;
-const RESET_DETAIL_TTL_MS = Number(process.env.CODEX_RESET_CREDITS_SECONDS ?? 3 * 3600) * 1000;
-// Whether a Codex plan renews changes rarely (a cancel, a resubscribe); check a few times a day.
-const SUBSCRIPTION_TTL_MS = Number(process.env.CODEX_SUBSCRIPTION_SECONDS ?? 6 * 3600) * 1000;
-
 export class CliProxyClient {
   private accounts: ProxyAccount[] = [];
   /** Claude/Codex accounts on the proxy, enabled or not, from the last listing (identity and status only, no tokens). */
   proxyAccounts: ProxyAccountStatus[] | null = null;
-  private profiles = new Map<string, { at: number; label: string | null; subscription: ClaudeSubscription }>();
-  /** Codex subscription state (renews or ends) per account; best effort, kept on a failed re-check. */
-  private subscriptions = new Map<string, { at: number; subscription: CodexSubscription | null }>();
-  /** Codex reset-credit detail per account; re-read only when the summary count changes or it ages out. */
-  private resetDetails = new Map<string, { at: number; count: number; resets: ReturnType<typeof parseResetCredits> }>();
   constructor(private readonly baseUrl: string, private readonly key: string,
     private readonly aliases: Record<string, string> = {}, private readonly fetcher: typeof fetch = fetch) {}
 
   private async management(path: string, body?: unknown): Promise<any> {
+    assertLocalManagementPath(path);
     const response = await this.fetcher(`${this.baseUrl.replace(/\/$/, "")}/v0/management/${path}`, {
       method: body === undefined ? "GET" : "POST",
       headers: { Authorization: `Bearer ${this.key}`, "Content-Type": "application/json" },
@@ -185,91 +192,11 @@ export class CliProxyClient {
       const id = legacy ?? `cpa:${identity}`;
       if (accounts.some(a => a.id === id)) continue;
       accounts.push({ id, provider, email, name: email ?? file.name ?? id, authIndex: file.auth_index, accountId: workspace,
-        priority: priorityOf(file.priority), observation: readObservation(file.quota) });
+        priority: priorityOf(file.priority), observation: readObservation(file.quota),
+        fileName: file.name ?? file.id ?? null, loginExpired: loginExpired(file) });
     }
     this.accounts = accounts;
     this.proxyAccounts = statuses;
     return accounts;
-  }
-
-  private async providerGet(account: ProxyAccount, url: string, headers: Record<string, string> = {}): Promise<any> {
-    const result = await this.management("api-call", {
-      authIndex: account.authIndex, method: "GET", url,
-      header: { Authorization: "Bearer $TOKEN$", Accept: "application/json", ...headers },
-    });
-    const status = Number(result.status_code ?? result.statusCode);
-    if (status === 429) {
-      const header = result.header ?? result.headers ?? {};
-      const retry = Object.entries(header).find(([k]) => k.toLowerCase() === "retry-after")?.[1];
-      const value = Array.isArray(retry) ? retry[0] : retry;
-      const { parseRetryAfter } = await import("../cache.js");
-      throw new RateLimitError(parseRetryAfter(value == null ? null : String(value)));
-    }
-    if (!Number.isFinite(status) || status < 200 || status >= 300)
-      throw new Error(`${account.provider} usage via CLIProxyAPI HTTP ${status || "unknown"}`);
-    const body = typeof result.body === "string" ? JSON.parse(result.body) : result.body;
-    if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Invalid provider usage response");
-    return body;
-  }
-
-  async fetchUsage(id: string): Promise<unknown> {
-    const account = this.accounts.find(a => a.id === id);
-    if (!account) throw new Error("CLIProxyAPI account is no longer active");
-    const checkedAt = new Date().toISOString();
-    if (account.provider === "claude") {
-      const headers = { "anthropic-beta": "oauth-2025-04-20",
-        "User-Agent": `claude-cli/${process.env.CLAUDE_CLI_VERSION ?? "2.1.306"} (external, cli)` };
-      const raw = await this.providerGet(account, "https://api.anthropic.com/api/oauth/usage?cedar_ember=1", headers);
-      // The weekly window is required; it can be null while idle or right after a reset, which is
-      // 0% used. The 5-hour window is optional: only some accounts have one, and it is null while idle.
-      if (!hasWeeklyWindow(raw)) throw new Error("Claude usage response is missing the weekly window");
-      let profile = this.profiles.get(id);
-      if (!profile || Date.now() - profile.at > PROFILE_TTL_MS) {
-        try {
-          const rawProfile = await this.providerGet(account, "https://api.anthropic.com/api/oauth/profile", headers);
-          profile = { at: Date.now(), label: planLabel(rawProfile), subscription: claudeSubscription(rawProfile, new Date().toISOString()) };
-          this.profiles.set(id, profile);
-        } catch { /* Keep a known plan if the optional profile request fails. */ }
-      }
-      return { ...parseClaudeUsage(raw, profile?.label ?? null, parseClaudeResetCredits(raw.cedar_ember)),
-        subscription: profile?.subscription ?? null,
-        connection_id: id, source: "cliproxyapi", checked_at: checkedAt,
-        reset_credits_checked_at: raw.cedar_ember ? checkedAt : null };
-    }
-    const headers: Record<string, string> = { "User-Agent": "codex-tui/0.149.1" };
-    if (account.accountId) headers["ChatGPT-Account-ID"] = account.accountId;
-    const raw = await this.providerGet(account, "https://chatgpt.com/backend-api/wham/usage", headers);
-    if (!raw.rate_limit) throw new Error("Codex usage response is missing quota windows");
-    let resets = null;
-    let resetCheckedAt: string | null = null;
-    let resetError: string | null = null;
-    const count = raw.rate_limit_reset_credits?.available_count;
-    const cached = this.resetDetails.get(id);
-    if (count === 0) {
-      resets = parseResetCredits({ available_count: 0 });
-      resetCheckedAt = checkedAt;
-    } else if (cached && cached.count === count && Date.now() - cached.at < RESET_DETAIL_TTL_MS) {
-      resets = cached.resets;
-      resetCheckedAt = new Date(cached.at).toISOString();
-    } else {
-      try {
-        const detail = await this.providerGet(account, "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
-          { ...headers, "OpenAI-Beta": "codex-1", Originator: "Codex Desktop" });
-        resets = parseResetCredits(detail);
-        resetCheckedAt = new Date().toISOString();
-        if (typeof count === "number") this.resetDetails.set(id, { at: Date.now(), count, resets });
-      } catch (err) { resetError = err instanceof Error ? err.message : "Reset-credit lookup failed"; }
-    }
-    let sub = this.subscriptions.get(id);
-    if (!sub || Date.now() - sub.at > SUBSCRIPTION_TTL_MS) {
-      try {
-        const body = await this.providerGet(account, ACCOUNTS_CHECK_URL, headers);
-        sub = { at: Date.now(), subscription: parseCodexSubscription(body, account.accountId, new Date().toISOString()) };
-        this.subscriptions.set(id, sub);
-      } catch { /* Optional; keep the last known state. */ }
-    }
-    return { ...parseCodexUsage(raw), reset_credits: resets, subscription: sub?.subscription ?? null,
-      source: "cliproxyapi", checked_at: checkedAt,
-      reset_credits_checked_at: resetCheckedAt, reset_credits_error: resetError };
   }
 }

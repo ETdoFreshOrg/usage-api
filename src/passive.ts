@@ -1,11 +1,9 @@
 /**
- * Passive quota: CLIProxyAPI keeps the rate-limit headers from the latest real
- * request on each account (`quota.signals` / `quota.observed_at` in its
- * auth-files listing). Anthropic and OpenAI put the account's current usage in
- * those headers, so they give exact, seconds-old numbers without calling the
- * usage endpoints at all. Only the fields the headers actually carry are taken
- * from here; everything else (Fable/Design windows, Spark, reset credits, plan
- * label for Claude) still comes from the slower active check.
+ * Proxy headers: CLIProxyAPI keeps the rate-limit headers from the latest real request on each
+ * account (`quota.signals` / `quota.observed_at` in its auth-files listing). Anthropic and
+ * OpenAI put the account's current usage in those headers, so they give exact, seconds-old
+ * numbers with no request of our own. Each window read here carries `as_of` (the request time)
+ * and source "proxy_headers". Only the fields the headers carry are taken from here.
  */
 
 import { classifyCodexWindows } from "./codex-windows.js";
@@ -16,11 +14,11 @@ export interface PassiveObservation {
   signals: Record<string, string>;
 }
 
-export interface PassiveClaudeWindow { utilization: number; resets_at: string | null }
+export interface PassiveClaudeWindow { utilization: number; resets_at: string | null; as_of: string; source: "proxy_headers" }
 /** five_hour is null when the headers carry no 5h window (account has none, or headers omit it). */
 export interface PassiveClaude { five_hour: PassiveClaudeWindow | null; seven_day: PassiveClaudeWindow }
 
-export interface PassiveCodexWindow { used_percent: number; resets_at: string | null; window_minutes: number }
+export interface PassiveCodexWindow { used_percent: number; resets_at: string | null; window_minutes: number; as_of?: string; source?: string }
 export interface PassiveCodex {
   plan_type: string | null;
   five_hour: PassiveCodexWindow | null;
@@ -59,6 +57,7 @@ export function parsePassiveClaude(o: PassiveObservation): PassiveClaude | null 
     return fraction == null ? null : {
       utilization: Math.round(fraction * 10000) / 100,
       resets_at: epochIso(s[`anthropic-ratelimit-unified-${slot}-reset`]),
+      as_of: o.observedAt, source: "proxy_headers",
     };
   };
   const sevenDay = window("7d");
@@ -101,7 +100,7 @@ export function parsePassiveCodex(o: PassiveObservation): PassiveCodex | null {
     let resets = epochIso(s[`x-codex-${slot}-reset-at`]);
     const after = num(s[`x-codex-${slot}-reset-after-seconds`]);
     if (!resets && after != null) resets = new Date(Date.parse(o.observedAt) + after * 1000).toISOString();
-    windows.push({ used_percent: used, resets_at: resets, window_minutes: minutes });
+    windows.push({ used_percent: used, resets_at: resets, window_minutes: minutes, as_of: o.observedAt, source: "proxy_headers" });
   }
   if (windows.length === 0) return null;
   const unlimited = (s["x-codex-credits-unlimited"] ?? "").toLowerCase() === "true";

@@ -44,8 +44,8 @@ test("Claude headers replace the weekly and 5-hour windows and keep active-only 
   const active = { seven_day: { utilization: 55, resets_at: "x" }, seven_day_fable: { utilization: 3, resets_at: null },
     subscription_type: "Max 20x" };
   const merged = mergePassive("claude", active, "2026-11-03T19:00:00Z", readObservation(claudeQuota), NOW);
-  assert.deepEqual(merged.seven_day, { utilization: 59, resets_at: "2026-11-06T01:00:00.000Z" });
-  assert.deepEqual(merged.five_hour, { utilization: 19, resets_at: null });
+  assert.deepEqual(merged.seven_day, { utilization: 59, resets_at: "2026-11-06T01:00:00.000Z", as_of: "2026-11-03T19:34:25.916Z", source: "proxy_headers" });
+  assert.deepEqual(merged.five_hour, { utilization: 19, resets_at: null, as_of: "2026-11-03T19:34:25.916Z", source: "proxy_headers" });
   assert.equal(merged.seven_day_fable.utilization, 3);
   assert.equal(merged.subscription_type, "Max 20x");
 });
@@ -101,7 +101,7 @@ const claudeWeeklyOnlyQuota = { observed_at: "2026-11-03T10:52:17.362713179-06:0
 
 test("Claude 5h headers become five_hour; accounts without them report null, not 0%", () => {
   const p = parsePassiveClaude(readObservation(claude5hQuota)!)!;
-  assert.deepEqual(p.five_hour, { utilization: 99, resets_at: "2026-11-03T23:30:00.000Z" });
+  assert.deepEqual(p.five_hour, { utilization: 99, resets_at: "2026-11-03T23:30:00.000Z", as_of: "2026-11-03T22:38:24.562Z", source: "proxy_headers" });
   assert.equal(p.seven_day.utilization, 73);
   const weeklyOnly = parsePassiveClaude(readObservation(claudeWeeklyOnlyQuota)!)!;
   assert.equal(weeklyOnly.five_hour, null);
@@ -151,7 +151,7 @@ test("a 24-hour window in the Codex limit's headers becomes one_day, and stops c
   const day = { observed_at: "2026-11-04T04:00:00Z", signals: { ...promaxImageQuota.signals, "X-Codex-Active-Limit": "premium",
     "X-Codex-Primary-Used-Percent": "40" } };
   const p = parsePassiveCodex(readObservation(day)!)!;
-  assert.deepEqual(p.one_day, { used_percent: 40, resets_at: "2026-11-05T03:47:01.000Z", window_minutes: 1440 });
+  assert.deepEqual(p.one_day, { used_percent: 40, resets_at: "2026-11-05T03:47:01.000Z", window_minutes: 1440, as_of: "2026-11-04T04:00:00.000Z", source: "proxy_headers" });
   assert.equal(p.five_hour, null);
   assert.equal(p.seven_day, null);
   const merged = mergePassive("codex", promaxActive, "2026-11-03T20:00:00Z", readObservation(day), Date.parse("2026-11-04T04:30:00Z"));

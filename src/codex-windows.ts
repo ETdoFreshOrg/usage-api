@@ -9,6 +9,9 @@ export interface CodexWindow {
   used_percent: number;
   resets_at: string | null;
   window_minutes: number;
+  /** When this number was observed, and which local source it came from (see providers/local.ts). */
+  as_of?: string;
+  source?: string;
 }
 
 export type CodexWindowSlot = "five_hour" | "one_day" | "seven_day";

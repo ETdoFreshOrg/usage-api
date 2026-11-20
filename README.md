@@ -4,11 +4,34 @@ Public, no-auth, always-cached aggregator for AI service usage. Polls
 Claude / Codex / Z.ai / OpenRouter / OpenAI in the background and serves
 the latest snapshot from memory — every request is O(0) network.
 
-Claude and Codex usage is fetched through CLIProxyAPI's authenticated management
-`api-call` endpoint when `CLIPROXYAPI_MANAGEMENT_KEY` is set. CLIProxyAPI owns and
-refreshes OAuth credentials; Usage API receives provider responses, never access
-or refresh tokens. All provider calls are read-only GETs, including reset-credit
-details. Each poll reads current data rather than cached quota headers.
+## Claude and Codex accounts are read-only (since 2026-11-20)
+
+usage-api makes **no** quota or usage request to Anthropic or ChatGPT, neither directly nor
+through CLIProxyAPI's `api-call`. Account numbers are read only from state that already
+exists on the network, as often as wanted:
+
+| Source | Read | Gives | Age |
+|---|---|---|---|
+| CLIProxyAPI account list | `GET /v0/management/auth-files`, every 15 s | Weekly / 5-hour / 24-hour % and reset times from the headers of the account's latest real request; credential status and cooldowns | Seconds while in use; in the proxy's memory only |
+| CPA Manager quota snapshots | `POST /v0/management/quota-snapshots/query` (a database read), every 30 s | Claude weekly and 5-hour windows recorded by its auto-ping worker; Codex windows it saved from headers | About 5 min for accounts on auto-ping; survives a proxy restart |
+| CPA Manager auto-ping status | `GET /v0/management/auto-ping`, every 30 s | Weekly % of the latest quota check; whether that check was rejected | About 5 min |
+
+The freshest observation wins, and every window carries `as_of` and `source`
+(`proxy_headers`, `manager_snapshot`, `auto_ping`). `fetchedAt` / `ageSec` are the age of the
+numbers themselves, not of the last local read: `little_stale` from 10 min, `stale` from
+30 min. A window whose reset time has passed is dropped rather than shown as 0%.
+
+Not available from these sources, and therefore `null`: Claude per-model weekly windows
+(Fable, Design, Sonnet, Opus), reset credits, the Claude plan label, Codex additional limits
+and credit balance, and provider-reported renewal / expiry dates (manual dates still apply).
+An account that is neither in use nor on CPA Manager's auto-ping has no fresh source.
+An expired sign-in is reported from the proxy's credential status or auto-ping's last answer
+(`loginExpired`, `error`), and nothing is retried. `refresh_usage` re-reads local state.
+
+Sections below that describe "active checks", `api-call`, usage endpoints, 429 backoff or
+9router predate this and are kept for history only. `src/providers/local.ts` and
+`src/account-poller.ts` are current, and `test/local.test.ts` fails if a provider usage
+endpoint or `api-call` reappears in the source.
 
 Set `CLIPROXYAPI_URL` (default `http://etzminisforumx1pro.lan:8317`) and
 `CLIPROXYAPI_MANAGEMENT_KEY`. Optional `CLIPROXYAPI_ACCOUNT_ALIASES` is a JSON map
