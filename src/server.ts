@@ -1,5 +1,5 @@
 import { AnalyticsReader } from "./analytics.js";
-import { nativeUsage } from "./native-usage.js";
+import { nativeUsageAt, readAntigravityQuota } from "./native-usage.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -381,11 +381,12 @@ function currentProviders(): Record<string, any> {
   return providers;
 }
 
+const antigravityQuota = await readAntigravityQuota(process.env.ANTIGRAVITY_QUOTA_SNAPSHOT_FILE);
 app.get("/api/usage", (_req, res) => {
   res.json({
     timestamp: new Date().toISOString(),
     providers: currentProviders(),
-    native_usage: nativeUsage,
+    native_usage: nativeUsageAt(antigravityQuota),
   });
 });
 
@@ -409,6 +410,7 @@ const mcpEnabled = installMcp(app, {
     : undefined,
   getAnalytics: async () => analyticsReader ? await analyticsReader.get() : null,
   getProviders: currentProviders,
+  getNativeUsage: (now) => nativeUsageAt(antigravityQuota, now),
   getProxyAccounts: () => cliProxy?.proxyAccounts ?? null,
   ...(cliProxy ? { clearProxyCooldown: async (key: string) => {
     const account = accountPollers.get(key);

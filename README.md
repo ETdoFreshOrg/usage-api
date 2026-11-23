@@ -14,6 +14,34 @@ cost, observation time and host coverage are unknown to this service.
 T3 Code can summarize usage locally, but its native records have no producer or
 transport into Usage API. The entry stays outside proxy and account totals.
 
+For a local trial, set `ANTIGRAVITY_QUOTA_SNAPSHOT_FILE` to an operator-prepared
+JSON file and start the API. Leave it unset for the normal unavailable response.
+The operator must verify the official Antigravity view is for the intended personal
+subscription and that the named quota group covers Neon. Use the fixed account
+slot below and omit all Google account identifiers and credentials. Example
+shape with fictional values:
+
+```json
+{
+  "account": "antigravity-personal",
+  "model_id": "gemini-4-neon-high",
+  "group": "Gemini Models",
+  "observed_at": "2026-01-12T15:00:00Z",
+  "windows": {
+    "five_hour": { "remaining_percent": 75, "resets_at": "2026-01-12T18:00:00Z" },
+    "weekly": { "remaining_percent": 40, "resets_at": null }
+  }
+}
+```
+
+The file is read at startup and affects only the optional
+`native_usage.antigravity.quota` object. Use explicit-offset date/times and
+omit any window the source did not report. A snapshot becomes stale after
+30 minutes. A passed reset clears that window's percentages until a new
+observation is supplied. `used_percent` is the complement of the reported
+remaining percentage. The quota is shared by the named group, and never
+feeds request totals, token totals, billing or provider rankings.
+
 ## Claude and Codex accounts are read-only (since 2026-11-20)
 
 usage-api makes **no** quota or usage request to Anthropic or ChatGPT, neither directly nor

@@ -11,7 +11,7 @@ import { CooldownError } from "./providers/cliproxy.js";
 import type { ProxyModelList } from "./proxy-models.js";
 import { ProxyModelsError } from "./proxy-models.js";
 import type { RefreshOutcome } from "./account-poller.js";
-import { nativeUsage } from "./native-usage.js";
+import { nativeUsageAt } from "./native-usage.js";
 
 /** What refresh_usage needs back from the server: the outcome plus the account's state afterwards. */
 export interface UsageRefresh {
@@ -47,6 +47,7 @@ export interface ToolContext {
   /** One on-demand usage check for one tracked account key, through its poller. */
   refreshUsage?: (account: string) => Promise<UsageRefresh | null>;
   now?: () => number;
+  getNativeUsage?: (now: number) => ReturnType<typeof nativeUsageAt>;
 }
 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
@@ -309,7 +310,7 @@ export async function callTool(name: string, rawArgs: unknown, ctx: ToolContext)
         accounts: accounts(ctx, provider),
         paused_on_proxy: paused === null ? null : paused.filter(a => !provider || a.provider === provider),
         other_providers: provider ? [] : others,
-        ...(!provider && { native_usage: nativeUsage }),
+        ...(!provider && { native_usage: ctx.getNativeUsage?.(now) ?? nativeUsageAt() }),
         notes: "reset_credits.available is a read-only count; no tool can use a reset. For Claude, weekly_available resets clear the account-wide weekly limit, fable_available ones only the Fable weekly limit, and other_available counts grants of an unrecognized kind. Codex and some Claude accounts have a 5-hour window as well as the weekly one; five_hour is null for accounts without one (or with no open session). Codex accounts can also report a 24-hour window (one_day; usually null); weekly is null if an account reports no weekly limit. pace_slack > 0 means under an even pace for that window. renewal is the next subscription billing date (America/Chicago calendar date): source provider means ChatGPT reported it (Codex), manual means it was entered by hand (Claude reports none); null if unknown or the plan will not renew. expiry is set when the subscription will end instead of renewing: expires_at is the last day (America/Chicago), days_until_expiry goes negative once passed, source provider means ChatGPT reported it (Codex), manual means it was entered by hand (Claude reports no end date); null means no end is known. paused_on_proxy is null when the proxy list is unavailable.",
       });
     }

@@ -1075,9 +1075,21 @@ async function tick() {
     }
     const neon = j.native_usage?.antigravity;
     if (neon?.model_id === "gemini-4-neon-high" && neon.telemetry === "unavailable") {
+      const quota = neon.quota;
+      const utc = (value) => new Date(value).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+      const detail = quota ? [
+        `${quota.group} · manual snapshot · ${quota.status === "stale" ? "Stale" : "Observed"} ${utc(quota.observed_at)}`,
+        ...quota.windows.map(w => {
+          const label = w.period === "weekly" ? "Weekly" : "5-hour";
+          const usage = w.expired ? "Reset passed · usage unknown" :
+            w.used_percent === null ? "Usage unknown" : `${w.used_percent}% used · ${w.remaining_percent}% remaining`;
+          const reset = w.resets_at ? `Reset ${utc(w.resets_at)}` : "Reset unknown";
+          return `${label} · ${usage} · ${reset}`;
+        }),
+      ].map(line => `<div>${escapeHtml(line)}</div>`).join("") : "No native telemetry";
       html += '<div class="provider-group">Google Gemini</div>'
         + '<section class="card"><h2>Gemini 4 Neon</h2>'
-        + '<div class="body">No native telemetry</div></section>';
+        + '<div class="body">' + detail + '</div></section>';
     }
     grid.innerHTML = html;
     if (latestHistory) renderHistory(latestHistory);
