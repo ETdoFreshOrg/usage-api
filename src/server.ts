@@ -1,4 +1,5 @@
 import { AnalyticsReader } from "./analytics.js";
+import { nativeUsage } from "./native-usage.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -384,6 +385,7 @@ app.get("/api/usage", (_req, res) => {
   res.json({
     timestamp: new Date().toISOString(),
     providers: currentProviders(),
+    native_usage: nativeUsage,
   });
 });
 

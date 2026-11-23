@@ -4,6 +4,16 @@ Public, no-auth, always-cached aggregator for AI service usage. Polls
 Claude / Codex / Z.ai / OpenRouter / OpenAI in the background and serves
 the latest snapshot from memory — every request is O(0) network.
 
+## Google Gemini via native Antigravity
+
+`GET /api/usage` and unfiltered MCP `list_accounts` include
+`native_usage.antigravity` for Gemini 4 Neon (native model `gemini-4-neon-high`).
+It reports `telemetry: "unavailable"`. The runtime identity is catalog
+metadata. Requests, token categories, account identity, quota windows, resets,
+cost, observation time and host coverage are unknown to this service.
+T3 Code can summarize usage locally, but its native records have no producer or
+transport into Usage API. The entry stays outside proxy and account totals.
+
 ## Claude and Codex accounts are read-only (since 2026-11-20)
 
 usage-api makes **no** quota or usage request to Anthropic or ChatGPT, neither directly nor

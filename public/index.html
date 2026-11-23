@@ -1073,6 +1073,12 @@ async function tick() {
       }
       html += card(n, j.providers[n]);
     }
+    const neon = j.native_usage?.antigravity;
+    if (neon?.model_id === "gemini-4-neon-high" && neon.telemetry === "unavailable") {
+      html += '<div class="provider-group">Google Gemini</div>'
+        + '<section class="card"><h2>Gemini 4 Neon</h2>'
+        + '<div class="body">No native telemetry</div></section>';
+    }
     grid.innerHTML = html;
     if (latestHistory) renderHistory(latestHistory);
   } catch (err) {

@@ -155,9 +155,14 @@ test("signed-in client lists the tools (all read-only but clear_proxy_cooldown) 
     assert.equal("proxy" in accounts.accounts[1], false);
     assert.deepEqual(accounts.paused_on_proxy, [{ provider: "claude", email: "paused@example.com" }]);
     assert.deepEqual(accounts.other_providers, [{ provider: "zai", has_data: false, note: "ZAI_API_KEY not set" }]);
+    assert.deepEqual(accounts.native_usage, { antigravity: {
+      display_name: "Google Gemini", model_name: "Gemini 4 Neon",
+      model_id: "gemini-4-neon-high", telemetry: "unavailable",
+    } });
 
     const codexOnly = (await call(s.base, tokens.access_token, "list_accounts", { provider: "codex" })).structuredContent;
     assert.deepEqual(codexOnly.accounts.map((a: any) => a.account), ["codex"]);
+    assert.equal(codexOnly.native_usage, undefined);
 
     const ranking = (await call(s.base, tokens.access_token, "suggest_account")).structuredContent.ranking;
     assert.deepEqual(ranking.map((r: any) => r.account), ["claude3", "codex", "claude", "claude4"]);
