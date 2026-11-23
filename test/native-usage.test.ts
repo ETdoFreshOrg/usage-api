@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { callTool, type ToolContext } from "../src/mcp-tools.js";
-import { nativeUsageAt, parseAntigravityQuota } from "../src/native-usage.js";
+import { nativeUsageAt, parseAntigravityQuota, parseAntigravityScreenshot } from "../src/native-usage.js";
 
 const observed = Date.parse("2026-01-12T15:00:00Z");
 const fixture = {
@@ -61,4 +61,24 @@ test("MCP exposes the same quota shape as REST without altering account rows", a
   assert.deepEqual(result.accounts, []);
   const filtered = (await callTool("list_accounts", { provider: "codex" }, context)).structuredContent;
   assert.ok(!("native_usage" in filtered));
+});
+
+test("screenshot keeps both groups in one Pro subscription with unknown freshness and resets", () => {
+  const snapshot = parseAntigravityScreenshot({
+    source: "antigravity_screenshot", account: "antigravity-personal", plan: "Pro",
+    observed_at: "2026-01-12T15:00:00Z",
+    groups: { gemini_models: { five_hour: 12, weekly: 73 }, claude_gpt_models: { five_hour: 86, weekly: 94 } },
+  });
+  const entry = nativeUsageAt(snapshot).antigravity;
+  assert.equal(entry.display_name, "Antigravity");
+  assert.equal(entry.model_id, "gemini-4-neon-high");
+  assert.equal(entry.quota, undefined);
+  const subscription = entry.subscription;
+  assert.ok(subscription);
+  assert.equal(subscription.status, "unknown");
+  assert.equal(subscription.observed_at, null);
+  assert.deepEqual(subscription.groups.map(g => g.label), ["Gemini Models", "Claude and GPT Models"]);
+  assert.deepEqual(subscription.groups.flatMap(g => g.windows.map(w =>
+    [w.used_percent, w.remaining_percent, w.resets_at])), [[88, 12, null], [27, 73, null], [14, 86, null], [6, 94, null]]);
+  assert.ok(subscription.groups.every(g => g.windows.every(w => w.expired === null)));
 });

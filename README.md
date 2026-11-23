@@ -4,7 +4,7 @@ Public, no-auth, always-cached aggregator for AI service usage. Polls
 Claude / Codex / Z.ai / OpenRouter / OpenAI in the background and serves
 the latest snapshot from memory — every request is O(0) network.
 
-## Google Gemini via native Antigravity
+## Antigravity subscription quota
 
 `GET /api/usage` and unfiltered MCP `list_accounts` include
 `native_usage.antigravity` for Gemini 4 Neon (native model `gemini-4-neon-high`).
@@ -41,6 +41,15 @@ omit any window the source did not report. A snapshot becomes stale after
 observation is supplied. `used_percent` is the complement of the reported
 remaining percentage. The quota is shared by the named group, and never
 feeds request totals, token totals, billing or provider rankings.
+
+For a reading transcribed from a screenshot, the same local file setting accepts
+`source: "antigravity_screenshot"`, `account: "antigravity-personal"`,
+`plan: "Pro"`, and a `groups` object keyed by `gemini_models` and
+`claude_gpt_models`. Within each group, give the reported remaining percentage
+for `five_hour` or `weekly` as a number. The API returns one
+`native_usage.antigravity.subscription` with distinct shared groups.
+It keeps the observation and reset timestamps null, including when the screenshot
+shows countdowns. The previous model and timed-quota keys remain compatible.
 
 ## Claude and Codex accounts are read-only (since 2026-11-20)
 

@@ -5,7 +5,7 @@ import { constants } from "node:fs";
 
 const nativeUsage = {
   antigravity: {
-    display_name: "Google Gemini",
+    display_name: "Antigravity",
     model_name: "Gemini 4 Neon",
     model_id: "gemini-4-neon-high",
     telemetry: "unavailable",
@@ -23,6 +23,20 @@ type Quota = Omit<Snapshot, "windows"> & {
   status: "fresh" | "stale";
   windows: (Window & { used_percent: number | null; expired: boolean })[];
 };
+const groupNames = { gemini_models: "Gemini Models", claude_gpt_models: "Claude and GPT Models" } as const;
+type ScreenshotGroup = {
+  id: keyof typeof groupNames;
+  label: (typeof groupNames)[keyof typeof groupNames];
+  windows: (Window & { used_percent: number; expired: null })[];
+};
+type Screenshot = {
+  source: "antigravity_screenshot";
+  account: "antigravity-personal";
+  plan: "Pro";
+  observed_at: null;
+  status: "unknown";
+  groups: ScreenshotGroup[];
+};
 
 function object(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -36,6 +50,32 @@ function instant(value: unknown): string | null {
   return Number.isFinite(time) ? new Date(time).toISOString() : null;
 }
 
+function percent(value: unknown): number | null {
+  return typeof value === "number" && value >= 0 && value <= 100 ? Number(value.toFixed(6)) : null;
+}
+
+export function parseAntigravityScreenshot(value: unknown): Screenshot | null {
+  const input = object(value);
+  if (input.source !== "antigravity_screenshot" || input.account !== "antigravity-personal" ||
+      input.plan !== "Pro") return null;
+  const supplied = object(input.groups);
+  const groups = (Object.keys(groupNames) as (keyof typeof groupNames)[]).flatMap(id => {
+    const amounts = object(supplied[id]);
+    const windows = periods.flatMap(period => {
+      const remaining_percent = percent(amounts[period]);
+      return remaining_percent === null ? [] : [{
+        period, remaining_percent, used_percent: Number((100 - remaining_percent).toFixed(6)),
+        resets_at: null, expired: null,
+      }];
+    });
+    return windows.length ? [{ id, label: groupNames[id], windows }] : [];
+  });
+  return groups.length ? {
+    source: "antigravity_screenshot", account: "antigravity-personal", plan: "Pro",
+    observed_at: null, status: "unknown", groups,
+  } : null;
+}
+
 export function parseAntigravityQuota(value: unknown, now = Date.now()): Snapshot | null {
   const snapshot = object(value);
   const group = snapshot.group;
@@ -47,16 +87,14 @@ export function parseAntigravityQuota(value: unknown, now = Date.now()): Snapsho
   const supplied = object(snapshot.windows);
   const windows = periods.flatMap(period => {
     const window = object(supplied[period]);
-    const remaining = window.remaining_percent;
-    const remaining_percent = typeof remaining === "number" && remaining >= 0 && remaining <= 100
-      ? Number(remaining.toFixed(6)) : null;
+    const remaining_percent = percent(window.remaining_percent);
     const resets_at = instant(window.resets_at);
     return remaining_percent === null && resets_at === null ? [] : [{ period, remaining_percent, resets_at }];
   });
   return windows.length ? { group, observed_at, windows } : null;
 }
 
-export async function readAntigravityQuota(file: string | undefined): Promise<Snapshot | null> {
+export async function readAntigravityQuota(file: string | undefined): Promise<Snapshot | Screenshot | null> {
   if (!file) return null;
   try {
     const handle = await open(file, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW);
@@ -65,7 +103,9 @@ export async function readAntigravityQuota(file: string | undefined): Promise<Sn
       if (!info.isFile() || info.size > 8192) return null;
       const data = Buffer.alloc(8193);
       const { bytesRead } = await handle.read(data, 0, data.length, 0);
-      return bytesRead > 8192 ? null : parseAntigravityQuota(JSON.parse(data.toString("utf8", 0, bytesRead)));
+      if (bytesRead > 8192) return null;
+      const input: unknown = JSON.parse(data.toString("utf8", 0, bytesRead));
+      return parseAntigravityScreenshot(input) ?? parseAntigravityQuota(input);
     } finally {
       await handle.close();
     }
@@ -74,9 +114,10 @@ export async function readAntigravityQuota(file: string | undefined): Promise<Sn
   }
 }
 
-export function nativeUsageAt(snapshot: Snapshot | null = null, now = Date.now()):
-  { antigravity: typeof nativeUsage.antigravity & { quota?: Quota } } {
+export function nativeUsageAt(snapshot: Snapshot | Screenshot | null = null, now = Date.now()):
+  { antigravity: typeof nativeUsage.antigravity & { quota?: Quota; subscription?: Screenshot } } {
   if (!snapshot) return nativeUsage;
+  if ("source" in snapshot) return { antigravity: { ...nativeUsage.antigravity, subscription: snapshot } };
   const windows = snapshot.windows.map(window => {
     const expired = window.resets_at !== null && Date.parse(window.resets_at) <= now;
     const remaining_percent = expired ? null : window.remaining_percent;

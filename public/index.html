@@ -1073,23 +1073,28 @@ async function tick() {
       }
       html += card(n, j.providers[n]);
     }
-    const neon = j.native_usage?.antigravity;
-    if (neon?.model_id === "gemini-4-neon-high" && neon.telemetry === "unavailable") {
-      const quota = neon.quota;
+    const antigravity = j.native_usage?.antigravity;
+    if (antigravity) {
+      const { quota, subscription } = antigravity;
       const utc = (value) => new Date(value).toISOString().slice(0, 16).replace("T", " ") + " UTC";
-      const detail = quota ? [
+      const windowLine = w => {
+        const label = w.period === "weekly" ? "Weekly" : "5-hour";
+        const usage = w.expired ? "Reset passed · usage unknown" :
+          w.used_percent === null ? "Usage unknown" : `${w.used_percent}% used · ${w.remaining_percent}% remaining`;
+        const reset = w.resets_at ? `Reset ${utc(w.resets_at)}` : "Reset unknown";
+        return `${label} · ${usage} · ${reset}`;
+      };
+      const lines = subscription ? [
+        "Screenshot · observation time unknown",
+        ...subscription.groups.flatMap(group => [group.label, ...group.windows.map(windowLine)]),
+      ] : quota ? [
         `${quota.group} · manual snapshot · ${quota.status === "stale" ? "Stale" : "Observed"} ${utc(quota.observed_at)}`,
-        ...quota.windows.map(w => {
-          const label = w.period === "weekly" ? "Weekly" : "5-hour";
-          const usage = w.expired ? "Reset passed · usage unknown" :
-            w.used_percent === null ? "Usage unknown" : `${w.used_percent}% used · ${w.remaining_percent}% remaining`;
-          const reset = w.resets_at ? `Reset ${utc(w.resets_at)}` : "Reset unknown";
-          return `${label} · ${usage} · ${reset}`;
-        }),
-      ].map(line => `<div>${escapeHtml(line)}</div>`).join("") : "No native telemetry";
-      html += '<div class="provider-group">Google Gemini</div>'
-        + '<section class="card"><h2>Gemini 4 Neon</h2>'
-        + '<div class="body">' + detail + '</div></section>';
+        ...quota.windows.map(windowLine),
+      ] : ["No native telemetry"];
+      const title = subscription ? `Personal subscription · ${subscription.plan}` : "Gemini 4 Neon";
+      html += '<div class="provider-group">Antigravity</div>'
+        + `<section class="card"><h2>${escapeHtml(title)}</h2><div class="body">`
+        + lines.map(line => `<div>${escapeHtml(line)}</div>`).join("") + '</div></section>';
     }
     grid.innerHTML = html;
     if (latestHistory) renderHistory(latestHistory);

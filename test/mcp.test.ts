@@ -156,7 +156,7 @@ test("signed-in client lists the tools (all read-only but clear_proxy_cooldown) 
     assert.deepEqual(accounts.paused_on_proxy, [{ provider: "claude", email: "paused@example.com" }]);
     assert.deepEqual(accounts.other_providers, [{ provider: "zai", has_data: false, note: "ZAI_API_KEY not set" }]);
     assert.deepEqual(accounts.native_usage, { antigravity: {
-      display_name: "Google Gemini", model_name: "Gemini 4 Neon",
+      display_name: "Antigravity", model_name: "Gemini 4 Neon",
       model_id: "gemini-4-neon-high", telemetry: "unavailable",
     } });
 
