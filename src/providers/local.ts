@@ -38,8 +38,10 @@ export interface AutoPingAccount {
 export interface SnapshotWindow {
   provider_window_id?: string; window_kind?: string; model_scope_kind?: string; model_scope_key?: string | null;
   used_percent?: number | null; cycle_end_ms?: number | null; duration_seconds?: number | null;
+  remaining_percent?: number | null; source?: string; availability?: string; stale?: boolean;
+  boundary_accuracy?: string;
   observed_at_ms?: number | null; plan_type?: string | null;
-  field_sources?: { quota?: { observed_at_ms?: number | null } | null } | null;
+  field_sources?: { quota?: { observed_at_ms?: number | null; source?: string } | null } | null;
 }
 
 export interface LocalState {

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { callTool, type ToolContext } from "../src/mcp-tools.js";
-import { nativeUsageAt, parseAntigravityQuota, parseAntigravityScreenshot } from "../src/native-usage.js";
+import { antigravitySnapshotTarget, nativeUsageAt, parseAntigravityQuota, parseAntigravityScreenshot } from "../src/native-usage.js";
+import { ManagerClient } from "../src/providers/local.js";
 
 const observed = Date.parse("2026-01-12T15:00:00Z");
 const fixture = {
@@ -81,4 +82,57 @@ test("screenshot keeps both groups in one Pro subscription with unknown freshnes
   assert.deepEqual(subscription.groups.flatMap(g => g.windows.map(w =>
     [w.used_percent, w.remaining_percent, w.resets_at])), [[88, 12, null], [27, 73, null], [14, 86, null], [6, 94, null]]);
   assert.ok(subscription.groups.every(g => g.windows.every(w => w.expired === null)));
+});
+
+test("one selected Antigravity account reuses the stored-window query and exposes only safe quota", async () => {
+  const calls: string[] = [];
+  const target = antigravitySnapshotTarget("private-contact@example.test.json", "private-index");
+  assert.ok(target);
+  assert.equal(antigravitySnapshotTarget(target.fileName!, undefined), null);
+  const reset = observed + 5 * 60 * 60_000;
+  const recent = { source: "api_query", observed_at_ms: observed - 60_000, availability: "active", remaining_percent: 62 };
+  const manager = new ManagerClient("http://fixture", "fixture-key", async (input, req) => {
+    const route = String(input).split("/").pop()!;
+    calls.push(route);
+    if (route === "auto-ping") {
+      assert.equal(req?.method, "GET");
+      return Response.json({ accounts: [] });
+    }
+    assert.equal(route, "query");
+    assert.equal(req?.method, "POST");
+    const body = JSON.parse(String(req?.body));
+    assert.deepEqual(body.accounts, [{ row_key: "antigravity-personal", provider: "antigravity", account: {
+      auth_file_snapshot: target.fileName, auth_index: "private-index",
+      auth_provider_snapshot: "antigravity", source: target.fileName,
+    } }]);
+    return Response.json({ items: [{ row_key: "antigravity-personal", windows: [
+      { ...recent, provider_window_id: "gemini-models:gemini-5h", window_kind: "five_hour",
+        cycle_end_ms: reset, boundary_accuracy: "exact", plan_type: "must-not-be-invented" },
+      { ...recent, provider_window_id: "gemini-models:gemini-5h", window_kind: "five_hour",
+        observed_at_ms: observed - 120_000, remaining_percent: 90 },
+      { ...recent, provider_window_id: "claude-and-gpt-models:3p-weekly", window_kind: "weekly",
+        remaining_percent: 0, cycle_end_ms: reset, boundary_accuracy: "estimated" },
+      { ...recent, provider_window_id: "gemini-models:gemini-weekly", window_kind: "weekly",
+        cycle_end_ms: observed - 1, boundary_accuracy: "exact" },
+      { ...recent, provider_window_id: "gemini-models:unfamiliar", window_kind: "weekly" },
+      { ...recent, provider_window_id: "claude-and-gpt-models:3p-5h", window_kind: "five_hour",
+        availability: "inactive" },
+    ] }] });
+  }, 10_000, () => observed);
+  const state = await manager.state([target]);
+  const windows = state.snapshots.get(target.id);
+  assert.ok(windows);
+  const native = nativeUsageAt(null, observed, windows);
+  const subscription = native.antigravity.subscription;
+  assert.equal(subscription?.source, "manager_snapshot");
+  assert.equal(subscription.plan, null);
+  assert.deepEqual(subscription.groups.map(g => [g.id, g.windows.map(w =>
+    [w.period, w.remaining_percent, w.used_percent, w.resets_at, w.expired])]), [
+    ["gemini_models", [["five_hour", 62, 38, new Date(reset).toISOString(), false],
+      ["weekly", null, null, new Date(observed - 1).toISOString(), true]]],
+    ["claude_gpt_models", [["weekly", 0, 100, null, false]]],
+  ]);
+  assert.doesNotMatch(JSON.stringify(native), /private-|example\.test|must-not-be-invented/);
+  assert.deepEqual(calls.sort(), ["auto-ping", "query"]);
+  assert.equal(nativeUsageAt(null, observed).antigravity.subscription, undefined);
 });

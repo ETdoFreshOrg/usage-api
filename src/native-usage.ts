@@ -2,6 +2,7 @@
 // Keep this outside proxy analytics and account snapshots so it never contributes to totals.
 import { open } from "node:fs/promises";
 import { constants } from "node:fs";
+import type { ManagerAccount, SnapshotWindow } from "./providers/local.js";
 
 const nativeUsage = {
   antigravity: {
@@ -37,6 +38,75 @@ type Screenshot = {
   status: "unknown";
   groups: ScreenshotGroup[];
 };
+
+const storedWindowIds = {
+  gemini_models: { five_hour: "gemini-models:gemini-5h", weekly: "gemini-models:gemini-weekly" },
+  claude_gpt_models: { five_hour: "claude-and-gpt-models:3p-5h", weekly: "claude-and-gpt-models:3p-weekly" },
+} as const;
+type StoredWindow = Quota["windows"][number] & { observed_at: string; status: "fresh" | "stale" };
+type StoredSubscription = {
+  source: "manager_snapshot";
+  account: "antigravity-personal";
+  plan: null;
+  observed_at: string;
+  status: "fresh" | "stale";
+  groups: (Omit<ScreenshotGroup, "windows"> & { windows: StoredWindow[] })[];
+};
+
+export function antigravitySnapshotTarget(fileName?: string, authIndex?: string): ManagerAccount | null {
+  if (!fileName?.trim() || !authIndex?.trim()) return null;
+  return {
+    id: "antigravity-personal", provider: "antigravity", email: null, accountId: null,
+    fileName: fileName.trim(), authIndex: authIndex.trim(),
+  };
+}
+
+export function storedAntigravitySubscription(snapshots: SnapshotWindow[], now: number): StoredSubscription | null {
+  const groups = (Object.keys(groupNames) as (keyof typeof groupNames)[]).flatMap(id => {
+    const windows = periods.flatMap(period => {
+      const expected = storedWindowIds[id][period];
+      const candidates = snapshots.flatMap(window => {
+        const windowId = window.provider_window_id;
+        // Manager uses the group label slug and bucket ID. Recognize the
+        // same Claude/GPT label with or without "and".
+        const matches = windowId === expected || (id === "claude_gpt_models" &&
+          windowId === expected.replace("claude-and-gpt-models:", "claude-gpt-models:"));
+        const evidence = window.field_sources?.quota;
+        const observed = evidence?.observed_at_ms ?? window.observed_at_ms;
+        if (!matches || window.window_kind !== period ||
+            (evidence?.source ?? window.source) !== "api_query" ||
+            (window.availability && window.availability !== "active") ||
+            typeof observed !== "number" || !Number.isSafeInteger(observed) ||
+            observed <= 0 || observed > now || observed > 8.64e15)
+          return [];
+        return [{ window, observed }];
+      });
+      candidates.sort((a, b) => b.observed - a.observed);
+      const first = candidates[0];
+      if (!first || candidates[1]?.observed === first.observed) return [];
+      const { window, observed } = first;
+      const end = window.cycle_end_ms;
+      const hasBoundary = typeof end === "number" && Number.isSafeInteger(end) && end > 0 && end <= 8.64e15;
+      const expired = hasBoundary && end <= now;
+      const remaining_percent = expired || window.stale ? null : percent(window.remaining_percent);
+      const used_percent = expired || window.stale ? null : percent(window.used_percent);
+      return [{ period, observed_at: new Date(observed).toISOString(),
+        status: expired || window.stale || now - observed >= staleAfterMs ? "stale" as const : "fresh" as const,
+        remaining_percent: remaining_percent ?? (used_percent === null ? null : percent(100 - used_percent)),
+        used_percent: used_percent ?? (remaining_percent === null ? null : percent(100 - remaining_percent)),
+        resets_at: hasBoundary && window.boundary_accuracy === "exact" ? new Date(end).toISOString() : null,
+        expired }];
+    });
+    return windows.length ? [{ id, label: groupNames[id], windows }] : [];
+  });
+  const windows = groups.flatMap(group => group.windows);
+  if (!windows.length) return null;
+  return {
+    source: "manager_snapshot", account: "antigravity-personal", plan: null,
+    observed_at: windows.map(w => w.observed_at).sort()[0],
+    status: windows.some(w => w.status === "stale") ? "stale" : "fresh", groups,
+  };
+}
 
 function object(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -114,8 +184,11 @@ export async function readAntigravityQuota(file: string | undefined): Promise<Sn
   }
 }
 
-export function nativeUsageAt(snapshot: Snapshot | Screenshot | null = null, now = Date.now()):
-  { antigravity: typeof nativeUsage.antigravity & { quota?: Quota; subscription?: Screenshot } } {
+export function nativeUsageAt(snapshot: Snapshot | Screenshot | null = null, now = Date.now(),
+  storedWindows: SnapshotWindow[] = []):
+  { antigravity: typeof nativeUsage.antigravity & { quota?: Quota; subscription?: Screenshot | StoredSubscription } } {
+  const stored = storedAntigravitySubscription(storedWindows, now);
+  if (stored) return { antigravity: { ...nativeUsage.antigravity, subscription: stored } };
   if (!snapshot) return nativeUsage;
   if ("source" in snapshot) return { antigravity: { ...nativeUsage.antigravity, subscription: snapshot } };
   const windows = snapshot.windows.map(window => {

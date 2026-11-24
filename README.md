@@ -6,6 +6,17 @@ the latest snapshot from memory — every request is O(0) network.
 
 ## Antigravity subscription quota
 
+Usage API can reuse CPA Manager's stored observations for one explicitly
+selected Antigravity credential. Set `ANTIGRAVITY_CPA_AUTH_FILE` and
+`ANTIGRAVITY_CPA_AUTH_INDEX` to the matching Manager credential metadata
+after verifying the intended account. A missing half leaves the lookup off.
+This adds one account to the existing stored-window query batch. It starts no
+new jobs and does not ask the proxy or provider to refresh quota. The public
+response contains only a fixed account slot and allowlisted group/window
+labels, percentages, observation times, and exact resets when present.
+Plan stays unknown because the Manager frontend's Antigravity snapshot write
+does not persist it. Quota stays unavailable until a matching stored record exists.
+
 `GET /api/usage` and unfiltered MCP `list_accounts` include
 `native_usage.antigravity` for Gemini 4 Neon (native model `gemini-4-neon-high`).
 It reports `telemetry: "unavailable"`. The runtime identity is catalog

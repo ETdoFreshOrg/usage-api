@@ -1,5 +1,5 @@
 import { AnalyticsReader } from "./analytics.js";
-import { nativeUsageAt, readAntigravityQuota } from "./native-usage.js";
+import { antigravitySnapshotTarget, nativeUsageAt, readAntigravityQuota } from "./native-usage.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -157,6 +157,7 @@ await expiries.load();
 const MANAGER_URL = process.env.CPA_MANAGER_URL ?? "http://etzminisforumx1pro.lan:18317";
 // Stored quota state (auto-ping results, saved snapshots). Reads only; see providers/local.ts.
 const manager = process.env.CPA_MANAGER_KEY ? new ManagerClient(MANAGER_URL, process.env.CPA_MANAGER_KEY) : null;
+const antigravityTarget = antigravitySnapshotTarget(process.env.ANTIGRAVITY_CPA_AUTH_FILE, process.env.ANTIGRAVITY_CPA_AUTH_INDEX);
 let managerAccounts: ManagerAccount[] = [];
 let localState: LocalState | null = null;
 const SIGN_IN_EXPIRED = "sign-in expired on the proxy; sign in again there (nothing is retried upstream)";
@@ -164,7 +165,7 @@ async function readLocalUsage(id: string): Promise<unknown> {
   if (!manager) throw new Error("no local quota source: CPA Manager is not configured (CPA_MANAGER_KEY)");
   const account = managerAccounts.find(a => a.id === id);
   if (!account) throw new Error("CLIProxyAPI account is no longer active");
-  localState = await manager.state(managerAccounts);
+  localState = await manager.state(antigravityTarget ? [...managerAccounts, antigravityTarget] : managerAccounts);
   const data = buildLocalUsage(account, localState);
   if (!data) throw new Error("no stored quota data for this account yet (not in use and not on auto-ping)");
   return data;
@@ -382,11 +383,13 @@ function currentProviders(): Record<string, any> {
 }
 
 const antigravityQuota = await readAntigravityQuota(process.env.ANTIGRAVITY_QUOTA_SNAPSHOT_FILE);
+const currentNativeUsage = (now = Date.now()) => nativeUsageAt(antigravityQuota, now,
+  antigravityTarget ? localState?.snapshots.get(antigravityTarget.id) : undefined);
 app.get("/api/usage", (_req, res) => {
   res.json({
     timestamp: new Date().toISOString(),
     providers: currentProviders(),
-    native_usage: nativeUsageAt(antigravityQuota),
+    native_usage: currentNativeUsage(),
   });
 });
 
@@ -410,7 +413,7 @@ const mcpEnabled = installMcp(app, {
     : undefined,
   getAnalytics: async () => analyticsReader ? await analyticsReader.get() : null,
   getProviders: currentProviders,
-  getNativeUsage: (now) => nativeUsageAt(antigravityQuota, now),
+  getNativeUsage: currentNativeUsage,
   getProxyAccounts: () => cliProxy?.proxyAccounts ?? null,
   ...(cliProxy ? { clearProxyCooldown: async (key: string) => {
     const account = accountPollers.get(key);

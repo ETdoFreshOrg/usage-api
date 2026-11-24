@@ -1085,13 +1085,15 @@ async function tick() {
         return `${label} · ${usage} · ${reset}`;
       };
       const lines = subscription ? [
-        "Screenshot · observation time unknown",
+        subscription.source === "manager_snapshot"
+          ? `CPA Manager snapshot · ${subscription.status === "stale" ? "Stale · " : ""}Oldest observation ${utc(subscription.observed_at)}`
+          : "Screenshot · observation time unknown",
         ...subscription.groups.flatMap(group => [group.label, ...group.windows.map(windowLine)]),
       ] : quota ? [
         `${quota.group} · manual snapshot · ${quota.status === "stale" ? "Stale" : "Observed"} ${utc(quota.observed_at)}`,
         ...quota.windows.map(windowLine),
-      ] : ["No native telemetry"];
-      const title = subscription ? `Personal subscription · ${subscription.plan}` : "Gemini 4 Neon";
+      ] : ["Subscription quota unavailable · No saved reading"];
+      const title = subscription?.plan ? `Personal subscription · ${subscription.plan}` : "Personal subscription";
       html += '<div class="provider-group">Antigravity</div>'
         + `<section class="card"><h2>${escapeHtml(title)}</h2><div class="body">`
         + lines.map(line => `<div>${escapeHtml(line)}</div>`).join("") + '</div></section>';
