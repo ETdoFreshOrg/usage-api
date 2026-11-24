@@ -26,7 +26,7 @@
   .tabs button { background: var(--panel-2); color: var(--fg); border: 1px solid var(--border); border-radius: 999px; padding: 6px 12px; font: inherit; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
   .tabs button.active { border-color: var(--accent); color: var(--accent); }
   .view.hidden { display: none; }
-  main { padding: 22px; display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 16px; }
+  main { padding: 22px; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 360px), 1fr)); gap: 16px; }
   .history { margin: 22px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
   .history-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
   .history-title { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
@@ -245,13 +245,16 @@ function barClass(used, expected) {
 }
 function bar(used, expected) {
   const cls = barClass(used, expected);
-  const w = Math.max(0, Math.min(100, used ?? 0));
+  // Leave the track empty when there is no reading, distinct from a measured 0%.
+  const fill = Number.isFinite(used)
+    ? `<div class="fill" style="width:${Math.max(0, Math.min(100, used))}%"></div>`
+    : "";
   const pace = expected != null && Number.isFinite(expected)
     ? `<div class="pace" style="left:${Math.max(0, Math.min(100, expected))}%"></div>`
     : "";
-  return `<div class="bar ${cls}"><div class="fill" style="width:${w}%"></div>${pace}</div>`;
+  return `<div class="bar ${cls}">${fill}${pace}</div>`;
 }
-function metricRow(label, used, expected, resetIso) {
+function metricRow(label, used, expected, resetIso, detail = "") {
   return `
     <div class="row">
       <div class="label">${label}</div>
@@ -259,10 +262,47 @@ function metricRow(label, used, expected, resetIso) {
       <div class="pct">${fmtPct(used)}</div>
     </div>
     <div class="sub">
+      ${detail}
       ${expected != null ? `pace ${fmtPct(expected)}` : ""}
       ${resetIso ? `· resets ${fmtRel(resetIso)} (${fmtTime(resetIso)})` : ""}
     </div>
   `;
+}
+
+function renderAntigravityWindow(reading) {
+  const label = reading.period === "weekly" ? "Weekly used" : "5-hour used";
+  const valid = value => Number.isFinite(value) && value >= 0 && value <= 100;
+  let used = null;
+  let remaining = null;
+  if (!reading.expired) {
+    if (valid(reading.used_percent)) used = reading.used_percent;
+    if (valid(reading.remaining_percent)) remaining = reading.remaining_percent;
+    used ??= remaining === null ? null : 100 - remaining;
+    remaining ??= used === null ? null : 100 - used;
+  }
+  const usage = reading.expired ? "Reset passed · usage unknown" :
+    remaining === null ? "Usage unknown" : `${fmtPct(remaining)} remaining`;
+  const reset = reading.resets_at && Number.isFinite(Date.parse(reading.resets_at)) ? reading.resets_at : null;
+  return metricRow(label, used, null, reset, reset ? usage : `${usage} · Reset unknown`);
+}
+
+function renderAntigravity({ quota, subscription }) {
+  const utc = value => new Date(value).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  const group = ({ label, windows }) => `<div class="group-label">${escapeHtml(label)}</div>
+    ${windows.map(renderAntigravityWindow).join("")}`;
+  let body = '<div class="empty">Subscription quota unavailable · No saved reading</div>';
+  if (subscription) {
+    const observation = subscription.source === "manager_snapshot"
+      ? `CPA Manager snapshot · ${subscription.status === "stale" ? "Stale · " : ""}Oldest observation ${utc(subscription.observed_at)}`
+      : "Screenshot · observation time unknown";
+    body = `<div class="sub">${observation}</div>${subscription.groups.map(group).join("")}`;
+  } else if (quota) {
+    const observation = `Manual snapshot · ${quota.status === "stale" ? "Stale · Observed " : "Observed "}${utc(quota.observed_at)}`;
+    body = `<div class="sub">${observation}</div>${group({ label: quota.group, windows: quota.windows })}`;
+  }
+  const title = subscription?.plan ? `Personal subscription · ${subscription.plan}` : "Personal subscription";
+  return `<div class="provider-group">Antigravity</div>
+    <section class="card"><h2>${escapeHtml(title)}</h2><div class="body">${body}</div></section>`;
 }
 
 function renderClaude(snap) {
@@ -1073,31 +1113,7 @@ async function tick() {
       }
       html += card(n, j.providers[n]);
     }
-    const antigravity = j.native_usage?.antigravity;
-    if (antigravity) {
-      const { quota, subscription } = antigravity;
-      const utc = (value) => new Date(value).toISOString().slice(0, 16).replace("T", " ") + " UTC";
-      const windowLine = w => {
-        const label = w.period === "weekly" ? "Weekly" : "5-hour";
-        const usage = w.expired ? "Reset passed · usage unknown" :
-          w.used_percent === null ? "Usage unknown" : `${w.used_percent}% used · ${w.remaining_percent}% remaining`;
-        const reset = w.resets_at ? `Reset ${utc(w.resets_at)}` : "Reset unknown";
-        return `${label} · ${usage} · ${reset}`;
-      };
-      const lines = subscription ? [
-        subscription.source === "manager_snapshot"
-          ? `CPA Manager snapshot · ${subscription.status === "stale" ? "Stale · " : ""}Oldest observation ${utc(subscription.observed_at)}`
-          : "Screenshot · observation time unknown",
-        ...subscription.groups.flatMap(group => [group.label, ...group.windows.map(windowLine)]),
-      ] : quota ? [
-        `${quota.group} · manual snapshot · ${quota.status === "stale" ? "Stale" : "Observed"} ${utc(quota.observed_at)}`,
-        ...quota.windows.map(windowLine),
-      ] : ["Subscription quota unavailable · No saved reading"];
-      const title = subscription?.plan ? `Personal subscription · ${subscription.plan}` : "Personal subscription";
-      html += '<div class="provider-group">Antigravity</div>'
-        + `<section class="card"><h2>${escapeHtml(title)}</h2><div class="body">`
-        + lines.map(line => `<div>${escapeHtml(line)}</div>`).join("") + '</div></section>';
-    }
+    if (j.native_usage?.antigravity) html += renderAntigravity(j.native_usage.antigravity);
     grid.innerHTML = html;
     if (latestHistory) renderHistory(latestHistory);
   } catch (err) {

@@ -217,8 +217,9 @@ test("Codex card omits unavailable 5-hour metrics without a notice", () => {
   assert.doesNotMatch(html, /metricRow\("primary", d\.primary/);
 });
 
-function loadRenderCodex() {
-  const names = ["fmtPct", "fmtTime", "fmtRel", "barClass", "bar", "metricRow", "resetCreditCounts", "renderResetCredits", "renderCodex"];
+function loadQuotaRenderers() {
+  const names = ["fmtPct", "fmtTime", "fmtRel", "barClass", "bar", "metricRow", "resetCreditCounts", "renderResetCredits", "renderCodex",
+    "renderAntigravityWindow", "renderAntigravity"];
   const src = names.map((name) => {
     const fn = html.match(new RegExp(`function ${name}\\([^)]*\\) \\{[\\s\\S]*?\\n\\}`));
     assert.ok(fn, `${name} should exist in public/index.html`);
@@ -227,12 +228,12 @@ function loadRenderCodex() {
   const esc = html.match(/function escapeHtml\(s\) \{.*\}/)[0];
   const sandbox = { Date, Number, Math, String, isNaN };
   vm.createContext(sandbox);
-  vm.runInContext(`${esc}\n${src}; globalThis.renderCodex = renderCodex; globalThis.renderResetCredits = renderResetCredits;`, sandbox);
-  return Object.assign(sandbox.renderCodex, { renderResetCredits: sandbox.renderResetCredits });
+  vm.runInContext(`${esc}\n${src}; globalThis.renderCodex = renderCodex; globalThis.renderResetCredits = renderResetCredits; globalThis.renderAntigravity = renderAntigravity;`, sandbox);
+  return sandbox;
 }
 
 test("Codex card shows a 24-hour window as its own row, never as the 5-hour one", () => {
-  const renderCodex = loadRenderCodex();
+  const { renderCodex } = loadQuotaRenderers();
   const resets = new Date(Date.now() + 12 * 3600_000).toISOString();
   const dayOnly = renderCodex({ data: { five_hour: null, seven_day: null, additional: [],
     one_day: { used_percent: 12, expected_percent: 50, resets_at: resets, window_minutes: 1440 } } });
@@ -253,6 +254,72 @@ test("Codex card shows a 24-hour window as its own row, never as the 5-hour one"
   assert.match(weeklyOnly, /<div class="label">7-day<\/div>/);
   assert.doesNotMatch(weeklyOnly, /5-hour/);
   assert.doesNotMatch(weeklyOnly, /no 7-day limit/);
+});
+
+test("Antigravity uses shared used-quota bars for both groups, including zero and full", () => {
+  const { renderAntigravity } = loadQuotaRenderers();
+  const resets_at = "2026-01-01T05:00:00Z";
+  const card = renderAntigravity({ subscription: {
+    source: "manager_snapshot", status: "fresh", observed_at: "2026-01-01T00:00:00Z",
+    groups: [
+      { label: "Gemini Models", windows: [
+        { period: "five_hour", used_percent: 0, remaining_percent: 100, resets_at },
+        { period: "weekly", used_percent: 75, remaining_percent: 25, resets_at },
+      ] },
+      { label: "Claude and GPT Models", windows: [
+        { period: "five_hour", used_percent: 100, remaining_percent: 0, resets_at: null },
+        { period: "weekly", remaining_percent: 85, resets_at },
+      ] },
+    ],
+  } });
+  assert.equal((card.match(/>Antigravity</g) ?? []).length, 1);
+  assert.match(card, /Gemini Models[\s\S]*Claude and GPT Models/);
+  assert.deepEqual([...card.matchAll(/class="bar (\w+)"><div class="fill" style="width:(\d+)%"/g)].map(m => m.slice(1)),
+    [["good", "0"], ["warn", "75"], ["bad", "100"], ["good", "15"]]);
+  assert.match(card, /Weekly used[\s\S]*75\.0%[\s\S]*25\.0% remaining/);
+  assert.match(card, /100\.0% remaining/);
+  assert.match(card, /0\.0% remaining · Reset unknown/);
+  assert.ok(card.includes(new Date(resets_at).toLocaleString()));
+  assert.doesNotMatch(card, /class="pace"/);
+});
+
+test("Antigravity keeps stale observations and reset details while missing and expired bars stay neutral", () => {
+  const { renderAntigravity } = loadQuotaRenderers();
+  const resets_at = "2026-01-01T05:00:00Z";
+  const card = renderAntigravity({ subscription: {
+    source: "manager_snapshot", status: "stale", observed_at: "2026-01-01T00:00:00Z",
+    groups: [{ label: "Gemini Models", windows: [
+      { period: "weekly", used_percent: 35, resets_at: null },
+      { period: "five_hour", used_percent: null, remaining_percent: null, resets_at: null },
+      { period: "five_hour", expired: true, used_percent: 100, remaining_percent: 0, resets_at },
+    ] }],
+  } });
+  assert.match(card, /Stale · Oldest observation 2026-01-01 00:00 UTC/);
+  assert.match(card, /35\.0%[\s\S]*65\.0% remaining/);
+  assert.equal((card.match(/class="bar "><\/div>/g) ?? []).length, 2);
+  assert.equal((card.match(/class="fill"/g) ?? []).length, 1);
+  assert.match(card, /Usage unknown · Reset unknown/);
+  assert.match(card, /Reset passed · usage unknown/);
+  assert.ok(card.includes(new Date(resets_at).toLocaleString()));
+  assert.doesNotMatch(card, /100\.0%|width:100%/);
+
+  const missing = renderAntigravity({});
+  assert.match(missing, /Subscription quota unavailable · No saved reading/);
+  assert.doesNotMatch(missing, /class="fill"|% remaining/);
+});
+
+test("Antigravity manual and screenshot quota keep their source and observation labels", () => {
+  const { renderAntigravity } = loadQuotaRenderers();
+  const screenshot = renderAntigravity({ subscription: {
+    source: "antigravity_screenshot", plan: "Pro", groups: [],
+  } });
+  assert.match(screenshot, /Screenshot · observation time unknown/);
+  const manual = renderAntigravity({ quota: {
+    group: "Gemini Models", status: "stale", observed_at: "2026-01-01T00:00:00Z",
+    windows: [{ period: "weekly", used_percent: 12, remaining_percent: 88, resets_at: null }],
+  } });
+  assert.match(manual, /Manual snapshot · Stale · Observed 2026-01-01 00:00 UTC/);
+  assert.match(manual, /Gemini Models[\s\S]*width:12%/);
 });
 
 test("optional second Codex account remains separate and clearly labeled", () => {
@@ -415,7 +482,7 @@ test("data age tooltip names the passive/active source", () => {
 });
 
 test("reset credits read per limit when Claude splits them, and as one count otherwise", () => {
-  const { renderResetCredits } = loadRenderCodex();
+  const { renderResetCredits } = loadQuotaRenderers();
   const split = renderResetCredits({ available_count: 3, weekly_available: 1, fable_available: 2, other_available: 0, next_expires_at: null });
   assert.match(split, /↻ 1 weekly reset · 2 Fable resets available/);
   assert.doesNotMatch(split, /other/);
